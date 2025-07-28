@@ -4,8 +4,8 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 from PySide6.QtCore import QThread, Signal, QObject
 
 # Importar las clases del modelo y la vista con las nuevas rutas de carpeta
-from model.model import TranslationCore
-from view.view import TranslatorAppView
+from model.translation_model import TranslationCore
+from view.translation_view import TranslatorAppView
 
 class WorkerThread(QThread):
     """
