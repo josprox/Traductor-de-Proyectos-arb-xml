@@ -49,6 +49,13 @@ class TranslationCore:
         self._load_history()
         self._initialize_log_file()
 
+    def set_project_path(self, new_path):
+        """Actualiza la ruta del proyecto y recarga historial/log."""
+        self.project_path = new_path
+        self._load_history()
+        self._initialize_log_file()
+        self._log(f"Ruta del proyecto actualizada a: {self.project_path}")
+
     def _log(self, message):
         """Envía un mensaje a la función de log configurada."""
         self.log_callback(message)
@@ -422,8 +429,9 @@ class TranslationCore:
                             xml_declaration=True,
                             pretty_print=True
                         ).decode("utf-8")
-                        if not formatted_xml.endswith("\n</resources>\n"):
-                            formatted_xml = formatted_xml.replace("</resources>", "\n</resources>")
+                        # Asegurar una nueva línea final si pretty_print no la añade consistentemente
+                        if not formatted_xml.endswith("\n"):
+                            formatted_xml += "\n"
                         
                         with open(current_path, "w", encoding="utf-8") as f:
                             f.write(formatted_xml)
@@ -496,8 +504,9 @@ class TranslationCore:
                                 xml_declaration=True,
                                 pretty_print=True
                             ).decode("utf-8")
-                            if not formatted_xml.endswith("\n</resources>\n"):
-                                formatted_xml = formatted_xml.replace("</resources>", "\n</resources>")
+                            # Asegurar una nueva línea final si pretty_print no la añade consistentemente
+                            if not formatted_xml.endswith("\n"):
+                                formatted_xml += "\n"
                             with open(current_path, "w", encoding="utf-8") as f:
                                 f.write(formatted_xml)
                             self._log(f"🗑️ '{key}' eliminado de {asset_name}/{self.KOTLIN_STRINGS_FILE_NAME} (Kotlin)")
@@ -594,8 +603,9 @@ class TranslationCore:
                                 xml_declaration=True,
                                 pretty_print=True
                             ).decode("utf-8")
-                            if not formatted_xml.endswith("\n</resources>\n"):
-                                formatted_xml = formatted_xml.replace("</resources>", "\n</resources>")
+                            # Asegurar una nueva línea final si pretty_print no la añade consistentemente
+                            if not formatted_xml.endswith("\n"):
+                                formatted_xml += "\n"
                             with open(current_path, "w", encoding="utf-8") as f:
                                 f.write(formatted_xml)
                             self._log(f"🗑️ '{key_to_delete}' eliminado de {asset_name}/{self.KOTLIN_STRINGS_FILE_NAME} (deshecho Kotlin).")
@@ -675,8 +685,9 @@ class TranslationCore:
                             xml_declaration=True,
                             pretty_print=True
                         ).decode("utf-8")
-                        if not formatted_xml.endswith("\n</resources>\n"):
-                            formatted_xml = formatted_xml.replace("</resources>", "\n</resources>")
+                        # Asegurar una nueva línea final si pretty_print no la añade consistentemente
+                        if not formatted_xml.endswith("\n"):
+                            formatted_xml += "\n"
                         with open(current_path, "w", encoding="utf-8") as f:
                             f.write(formatted_xml)
                         self._log(f"✅ Restaurado '{key_to_restore}' en {asset_name}/{self.KOTLIN_STRINGS_FILE_NAME} (deshecho Kotlin).")
