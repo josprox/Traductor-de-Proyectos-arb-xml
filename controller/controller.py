@@ -3,7 +3,7 @@ import sys
 from PySide6.QtWidgets import QApplication, QFileDialog
 from PySide6.QtCore import QThread, Signal, QObject
 
-# Importar las clases del modelo y la vista
+# Importar las clases del modelo y la vista con las nuevas rutas de carpeta
 from model.model import TranslationCore
 from view.view import TranslatorAppView
 
@@ -67,7 +67,8 @@ class TranslatorAppController(QObject):
     def __init__(self, app_instance):
         super().__init__()
         self.app = app_instance
-        self.project_path = self._get_initial_script_dir() # Ruta inicial del script
+        # Obtener la ruta del directorio del script principal (main.py)
+        self.project_path = os.path.dirname(os.path.abspath(sys.argv[0]))
 
         # Inicializar la vista (UI)
         self.view = TranslatorAppView(self.project_path)
@@ -81,8 +82,12 @@ class TranslatorAppController(QObject):
         self._update_ui_state() # Actualizar el estado inicial de la UI y botones
 
     def _get_initial_script_dir(self):
-        """Devuelve el directorio donde se encuentra el script principal al inicio."""
-        return os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.realpath(__file__))
+        """
+        Devuelve el directorio donde se encuentra el script principal que inició la aplicación.
+        Esto asegura que la ruta base sea la del directorio raíz del proyecto.
+        """
+        # sys.argv[0] contiene la ruta del script que fue ejecutado (main.py en este caso)
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
 
     def _connect_signals(self):
         """Conecta las señales de la vista a los slots del controlador."""
@@ -95,6 +100,7 @@ class TranslatorAppController(QObject):
         self.view.flutter_intl_generate_requested.connect(self._handle_flutter_intl_generate)
         self.view.undo_requested.connect(self._handle_undo_action)
         self.view.show_history_requested.connect(self._handle_show_history)
+        self.view.navigation_selected.connect(self._handle_navigation_selection) # Conectar nueva señal de navegación
 
     def _update_ui_state(self):
         """Actualiza el estado de la UI (botones, etc.) basado en el modelo."""
@@ -278,6 +284,20 @@ class TranslatorAppController(QObject):
         history_data = self.model.get_history()
         self.view.show_history_dialog(history_data)
 
+    def _handle_navigation_selection(self, item_text):
+        """
+        Maneja la selección de un elemento del menú de navegación.
+        Aquí se puede añadir lógica para cargar diferentes vistas/páginas.
+        """
+        self.view.append_log(f"Navegación seleccionada: {item_text}")
+        # En este punto, si tuvieras más páginas, podrías hacer:
+        # if item_text == "Traductor":
+        #     self.view.stacked_widget.setCurrentIndex(0)
+        # elif item_text == "Otra Opción 1":
+        #     self.view.stacked_widget.setCurrentIndex(1)
+        # etc.
+        # Por ahora, el setCurrentIndex ya se maneja en la vista.
+
     def _on_worker_finished(self, result_data):
         """Callback cuando un WorkerThread termina exitosamente."""
         self.view.append_log(f"Operación '{result_data.get('type', 'desconocida')}' finalizada para {result_data.get('platform', 'desconocida').upper()}.")
@@ -290,4 +310,3 @@ class TranslatorAppController(QObject):
         self.view.show_critical_message("Error de Operación", message)
         self.view.update_progress_bar(0)
         self._update_ui_state() # Re-habilitar UI y actualizar estado del botón deshacer
-

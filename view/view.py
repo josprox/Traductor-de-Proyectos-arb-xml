@@ -2,7 +2,7 @@ import os
 from PySide6.QtWidgets import (
     QMainWindow, QPushButton, QWidget, QVBoxLayout,
     QLabel, QLineEdit, QTextEdit, QInputDialog, QMessageBox, QProgressBar,
-    QHBoxLayout, QComboBox, QFileDialog, QDialog, QListWidget # Añadido QDialog y QListWidget
+    QHBoxLayout, QComboBox, QFileDialog, QDialog, QListWidget, QStackedWidget # QSplitter was not used, removed to simplify
 )
 from PySide6.QtCore import Qt, Signal, QObject
 from datetime import datetime # Necesario para mostrar el historial
@@ -22,11 +22,12 @@ class TranslatorAppView(QMainWindow):
     flutter_intl_generate_requested = Signal()
     undo_requested = Signal()
     show_history_requested = Signal()
+    navigation_selected = Signal(str) # Nueva señal para la selección del menú de navegación
 
     def __init__(self, initial_project_path):
         super().__init__()
         self.setWindowTitle("Traductor ARB/Kotlin - Joss Red")
-        self.setMinimumSize(700, 600)
+        self.setMinimumSize(800, 600) # Aumentar el tamaño mínimo para el navbar
         self._current_platform = "flutter" # Estado inicial, se actualiza con el selector
 
         self.init_ui(initial_project_path)
@@ -36,7 +37,25 @@ class TranslatorAppView(QMainWindow):
         """
         Inicializa los elementos de la interfaz de usuario y su diseño.
         """
-        main_layout = QVBoxLayout()
+        # Layout principal que contendrá el splitter
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_horizontal_layout = QHBoxLayout(central_widget)
+
+        # --- Navbar Lateral Izquierdo ---
+        self.navbar_list_widget = QListWidget()
+        self.navbar_list_widget.setMaximumWidth(150) # Ancho fijo para el navbar
+        self.navbar_list_widget.addItem("Traductor") # Índice 0
+        # self.navbar_list_widget.addItem("Otra Opción 1") # Futuras opciones
+        # self.navbar_list_widget.addItem("Otra Opción 2") # Futuras opciones
+        
+        # --- Contenido Principal (Stacked Widget) ---
+        # Inicializar stacked_widget ANTES de conectar la señal del navbar
+        self.stacked_widget = QStackedWidget()
+
+        # Página del Traductor (contenido existente)
+        translator_page_widget = QWidget()
+        translator_layout = QVBoxLayout(translator_page_widget)
 
         # Selector de plataforma
         platform_layout = QHBoxLayout()
@@ -49,7 +68,7 @@ class TranslatorAppView(QMainWindow):
         )
         platform_layout.addWidget(self.platform_selector)
         platform_layout.addStretch()
-        main_layout.addLayout(platform_layout)
+        translator_layout.addLayout(platform_layout)
 
         # Selector de carpeta de proyecto
         project_path_layout = QHBoxLayout()
@@ -60,7 +79,7 @@ class TranslatorAppView(QMainWindow):
         self.select_folder_btn = QPushButton("Seleccionar Carpeta")
         self.select_folder_btn.clicked.connect(self.select_folder_requested.emit)
         project_path_layout.addWidget(self.select_folder_btn)
-        main_layout.addLayout(project_path_layout)
+        translator_layout.addLayout(project_path_layout)
 
         # Campos de entrada
         input_grid_layout = QVBoxLayout()
@@ -85,7 +104,7 @@ class TranslatorAppView(QMainWindow):
         self.desc_input.setPlaceholderText("Descripción (opcional)")
         input_grid_layout.addWidget(self.desc_input)
 
-        main_layout.addLayout(input_grid_layout)
+        translator_layout.addLayout(input_grid_layout)
 
         # Botones de acción
         button_layout = QHBoxLayout()
@@ -104,7 +123,7 @@ class TranslatorAppView(QMainWindow):
         self.delete_key_btn = QPushButton("Eliminar Etiqueta/String")
         self.delete_key_btn.clicked.connect(self._prompt_delete_key)
         button_layout.addWidget(self.delete_key_btn)
-        main_layout.addLayout(button_layout)
+        translator_layout.addLayout(button_layout)
         
         # Botón específico de Flutter Intl Generate
         intl_generate_layout = QHBoxLayout()
@@ -112,7 +131,7 @@ class TranslatorAppView(QMainWindow):
         self.flutter_intl_generate_btn.clicked.connect(self.flutter_intl_generate_requested.emit)
         intl_generate_layout.addWidget(self.flutter_intl_generate_btn)
         intl_generate_layout.addStretch()
-        main_layout.addLayout(intl_generate_layout)
+        translator_layout.addLayout(intl_generate_layout)
 
         # Botones de Historial y Deshacer
         history_undo_layout = QHBoxLayout()
@@ -123,26 +142,45 @@ class TranslatorAppView(QMainWindow):
         self.undo_btn = QPushButton("Deshacer Último Cambio")
         self.undo_btn.clicked.connect(self._confirm_undo_action)
         history_undo_layout.addWidget(self.undo_btn)
-        main_layout.addLayout(history_undo_layout)
+        translator_layout.addLayout(history_undo_layout)
 
         # Barra de progreso
         self.progress_bar = QProgressBar()
         self.progress_bar.setAlignment(Qt.AlignCenter)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("Progreso: %p%")
-        main_layout.addWidget(self.progress_bar)
+        translator_layout.addWidget(self.progress_bar)
 
-        main_layout.addSpacing(10)
+        translator_layout.addSpacing(10)
 
         # Consola de salida
-        main_layout.addWidget(QLabel("Consola de salida"))
+        translator_layout.addWidget(QLabel("Consola de salida"))
         self.output = QTextEdit()
         self.output.setReadOnly(True)
-        main_layout.addWidget(self.output)
+        translator_layout.addWidget(self.output)
 
-        container = QWidget()
-        container.setLayout(main_layout)
-        self.setCentralWidget(container)
+        # Añadir la página del traductor al stacked widget
+        self.stacked_widget.addWidget(translator_page_widget) # Índice 0 para el traductor
+
+        # Conectar la selección del navbar a una función que emita la señal
+        self.navbar_list_widget.currentRowChanged.connect(self._on_navbar_selection_changed)
+        # Establecer la fila actual DESPUÉS de que stacked_widget esté inicializado y tenga widgets
+        self.navbar_list_widget.setCurrentRow(0) # Seleccionar "Traductor" por defecto
+
+
+        # --- Añadir navbar y stacked widget al layout principal ---
+        main_horizontal_layout.addWidget(self.navbar_list_widget)
+        main_horizontal_layout.addWidget(self.stacked_widget)
+
+    def _on_navbar_selection_changed(self, row):
+        """
+        Maneja el cambio de selección en el menú de navegación y emite una señal.
+        """
+        item_text = self.navbar_list_widget.item(row).text()
+        self.navigation_selected.emit(item_text)
+        # También actualiza el stacked widget directamente para la navegación
+        self.stacked_widget.setCurrentIndex(row)
+
 
     def _emit_translate_request(self):
         """Emite la señal de traducción con los datos de los campos de entrada."""
