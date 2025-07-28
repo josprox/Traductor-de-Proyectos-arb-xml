@@ -2,3 +2,7 @@ translation_history.json
 translation_log.xlsx
 */__pycache__/
 /__pycache__/
+/build/
+/.vscode/
+/dist/
+main.spec
