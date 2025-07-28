@@ -4,8 +4,8 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 from PySide6.QtCore import QThread, Signal, QObject
 
 # Importar las clases del modelo y la vista
-from model import TranslationCore
-from view import TranslatorAppView
+from model.model import TranslationCore
+from view.view import TranslatorAppView
 
 class WorkerThread(QThread):
     """
