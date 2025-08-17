@@ -1,8 +1,8 @@
 import sys
 from PySide6.QtWidgets import QApplication
-from controller.translation_controller import TranslatorAppController # Importar el controlador
+from controller.translation_controller import TranslatorAppController
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    controller = TranslatorAppController(app) # Instanciar el controlador
+    controller = TranslatorAppController(app)
     sys.exit(app.exec())

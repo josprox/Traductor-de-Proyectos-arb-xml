@@ -1,96 +1,89 @@
+# controller/translation_controller.py
 import os
 import sys
-from PySide6.QtWidgets import QApplication, QFileDialog
-from PySide6.QtCore import QThread, Signal, QObject
-
-# Importar las clases del modelo y la vista con las nuevas rutas de carpeta
-from model.translation_model import TranslationCore
+from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
+from PySide6.QtWidgets import QFileDialog
 from view.translation_view import TranslatorAppView
-
-class WorkerThread(QThread):
-    """
-    Una subclase de QThread para realizar operaciones de larga duración en segundo plano.
-    Delega las operaciones directamente a la instancia de TranslationCore.
-    """
-    progress_updated = Signal(int)
-    log_message = Signal(str)
-    operation_finished = Signal(dict) # Señal genérica para indicar que una operación terminó
-    error_occurred = Signal(str)
-    command_output = Signal(str)
-
-    def __init__(self, operation_type, core_instance, data=None):
-        super().__init__()
-        self.operation_type = operation_type
-        self.core = core_instance # Instancia de TranslationCore
-        self.data = data
-
-    def run(self):
-        """
-        Ejecuta la operación especificada, llamando a los métodos del core.
-        """
-        try:
-            if self.operation_type == "translate_and_add":
-                self.log_message.emit(f"Iniciando traducción para '{self.data['key']}' en plataforma {self.data['platform'].upper()}...")
-                self.progress_updated.emit(0)
-                translations = self.core.fetch_translations_from_api(
-                    self.data['base_lang'], self.data['original_text'], self.data['platform']
-                )
-                self.progress_updated.emit(50) # Progreso después de la API
-
-                self.core.add_translation_entry(
-                    self.data['base_lang'], self.data['original_text'], self.data['key'],
-                    self.data['desc'], translations, self.data['existing_key_files'], self.data['platform']
-                )
-                self.operation_finished.emit({'type': 'translate_and_add', 'platform': self.data['platform']})
-
-            elif self.operation_type == "delete_key":
-                self.log_message.emit(f"Iniciando eliminación de clave/string '{self.data['key']}' en plataforma {self.data['platform'].upper()}...")
-                self.progress_updated.emit(0)
-                self.core.delete_key_entry(self.data['key'], self.data['platform'])
-                self.operation_finished.emit({'type': 'delete_key', 'platform': self.data['platform']})
-
-            elif self.operation_type == "run_flutter_intl_generate":
-                output, return_code = self.core.run_flutter_intl_generate()
-                self.command_output.emit(output)
-                self.operation_finished.emit({'type': 'run_flutter_intl_generate', 'platform': 'flutter'})
-
-        except Exception as e:
-            self.error_occurred.emit(f"❌ Error en la operación '{self.operation_type}': {e}")
-        finally:
-            self.progress_updated.emit(100) # Asegurar que la barra de progreso llegue al final
+from .worker import TranslationWorker
 
 class TranslatorAppController(QObject):
     """
-    Controlador principal de la aplicación.
-    Conecta la vista (UI) con el modelo (lógica de negocio).
+    Controlador principal. Orquesta UI y worker.
+    Nunca toca la UI desde hilos secundarios; toda interacción va por señales queued.
     """
+
+    # Señal de logging GUI-safe
+    log_signal = Signal(str)
+
+    # Señales -> Worker (commands)
+    sig_translate_and_add = Signal(dict)
+    sig_delete_key = Signal(dict)
+    sig_flutter_generate = Signal()
+    sig_create_assets = Signal(str)
+    sig_delete_assets = Signal(str)
+    sig_get_history = Signal()
+    sig_undo_last = Signal(dict)
+    sig_set_project_path = Signal(str)
+
     def __init__(self, app_instance):
         super().__init__()
         self.app = app_instance
-        # Obtener la ruta del directorio del script principal (main.py)
+
+        # Ruta del proyecto (del script principal)
         self.project_path = os.path.dirname(os.path.abspath(sys.argv[0]))
 
-        # Inicializar la vista (UI)
+        # Banderas internas para coordinar acciones que dependen del historial
+        self._pending_show_history = False
+        self._pending_undo = False
+
+        # Vista
         self.view = TranslatorAppView(self.project_path)
         self.view.show()
 
-        # Inicializar el modelo (lógica de negocio)
-        # Pasar el método log de la vista como callback para que el modelo pueda enviar mensajes a la UI
-        self.model = TranslationCore(self.project_path, log_callback=self.view.append_log)
+        # Conectar log_signal a la vista (thread-safe)
+        self.log_signal.connect(self.view.append_log, Qt.QueuedConnection)
 
-        self._connect_signals()
-        self._update_ui_state() # Actualizar el estado inicial de la UI y botones
+        # Hilo + Worker
+        self.thread = QThread(self)
+        self.worker = TranslationWorker(self.project_path)
+        self.worker.moveToThread(self.thread)
 
-    def _get_initial_script_dir(self):
-        """
-        Devuelve el directorio donde se encuentra el script principal que inició la aplicación.
-        Esto asegura que la ruta base sea la del directorio raíz del proyecto.
-        """
-        # sys.argv[0] contiene la ruta del script que fue ejecutado (main.py en este caso)
-        return os.path.dirname(os.path.abspath(sys.argv[0]))
+        # Al iniciar el hilo, el worker crea el core
+        self.thread.started.connect(self.worker.on_start)
 
-    def _connect_signals(self):
-        """Conecta las señales de la vista a los slots del controlador."""
+        # Worker -> Vista / Controlador
+        self.worker.progress_updated.connect(self.view.update_progress_bar, Qt.QueuedConnection)
+        self.worker.log_message.connect(self.view.append_log, Qt.QueuedConnection)
+        self.worker.operation_finished.connect(self._on_worker_finished, Qt.QueuedConnection)
+        self.worker.error_occurred.connect(self._on_worker_error, Qt.QueuedConnection)
+        self.worker.command_output.connect(self.view.append_log, Qt.QueuedConnection)
+        self.worker.history_ready.connect(self._on_history_ready, Qt.QueuedConnection)
+
+        # Controlador -> Worker (commands)
+        self.sig_translate_and_add.connect(self.worker.do_translate_and_add, Qt.QueuedConnection)
+        self.sig_delete_key.connect(self.worker.do_delete_key, Qt.QueuedConnection)
+        self.sig_flutter_generate.connect(self.worker.do_flutter_generate, Qt.QueuedConnection)
+        self.sig_create_assets.connect(self.worker.do_create_assets, Qt.QueuedConnection)
+        self.sig_delete_assets.connect(self.worker.do_delete_assets, Qt.QueuedConnection)
+        self.sig_get_history.connect(self.worker.do_get_history, Qt.QueuedConnection)
+        self.sig_undo_last.connect(self.worker.do_undo_last, Qt.QueuedConnection)
+        self.sig_set_project_path.connect(self.worker.do_set_project_path, Qt.QueuedConnection)
+
+        # Señales desde la vista
+        self._connect_view_signals()
+
+        # Estado inicial
+        self._update_ui_state()
+
+        # Arrancar hilo
+        self.thread.start()
+
+        # Apagado limpio
+        self.app.aboutToQuit.connect(self._shutdown)
+
+    # ================= Conexión de vista =================
+
+    def _connect_view_signals(self):
         self.view.platform_changed.connect(self._handle_platform_changed)
         self.view.select_folder_requested.connect(self._handle_select_folder)
         self.view.translate_requested.connect(self._handle_translate_request)
@@ -100,33 +93,35 @@ class TranslatorAppController(QObject):
         self.view.flutter_intl_generate_requested.connect(self._handle_flutter_intl_generate)
         self.view.undo_requested.connect(self._handle_undo_action)
         self.view.show_history_requested.connect(self._handle_show_history)
-        self.view.navigation_selected.connect(self._handle_navigation_selection) # Conectar nueva señal de navegación
+        self.view.navigation_selected.connect(self._handle_navigation_selection)
+
+    # ================= Utilidades =================
 
     def _update_ui_state(self):
-        """Actualiza el estado de la UI (botones, etc.) basado en el modelo."""
-        self.view.set_ui_enabled(True) # Re-habilitar todos los controles inicialmente
-        # Ajustar el estado del botón de deshacer basado en el historial del modelo
-        self.view.undo_btn.setEnabled(len(self.model.get_history()) > 0)
+        # No bloqueamos: la UI se habilita; el progreso lo controla el worker mediante señales
+        self.view.set_ui_enabled(True)
+        # Consultar historial para habilitar/deshabilitar Undo
+        self.sig_get_history.emit()
 
-    def _handle_platform_changed(self, platform):
-        """Maneja el cambio de plataforma en la UI."""
-        self.view._update_ui_for_platform(platform) # Actualizar la vista directamente
+    # ================= Handlers de Vista =================
+
+    def _handle_platform_changed(self, platform: str):
+        self.view._update_ui_for_platform(platform)
         self.view.append_log(f"Plataforma cambiada a: {platform.upper()}")
-        self._update_ui_state() # Re-evaluar el estado de los botones
+        self._update_ui_state()
 
     def _handle_select_folder(self):
-        """Maneja la solicitud de selección de carpeta."""
         dialog = QFileDialog(self.view)
         dialog.setFileMode(QFileDialog.Directory)
         dialog.setOption(QFileDialog.ShowDirsOnly, True)
-        
         selected_dir = dialog.getExistingDirectory(self.view, "Seleccionar Carpeta del Proyecto", self.project_path)
-        
+
         if selected_dir and selected_dir != self.project_path:
             self.project_path = selected_dir
             self.view.update_project_path_display(self.project_path)
-            self.model.set_project_path(self.project_path) # Notificar al modelo del cambio de ruta
             self.view.append_log(f"Carpeta del proyecto seleccionada: {self.project_path}")
+            # Avisar al worker que actualice el core
+            self.sig_set_project_path.emit(self.project_path)
             self._update_ui_state()
         elif selected_dir == self.project_path:
             self.view.append_log("La carpeta seleccionada ya es la carpeta del proyecto actual.")
@@ -134,179 +129,124 @@ class TranslatorAppController(QObject):
             self.view.append_log("Selección de carpeta de proyecto cancelada.")
 
     def _handle_translate_request(self, base_lang, original_text, key, desc, platform):
-        """Maneja la solicitud de traducción y adición de etiqueta."""
         if not all([base_lang, original_text, key]):
-            self.view.append_log("⚠️ Por favor, completa todos los campos requeridos (Idioma base, Texto original, Nombre de la etiqueta/string).")
+            self.view.append_log("⚠️ Completa idioma base, texto original y nombre de etiqueta/string.")
             return
-
-        existing_key_files = self.model.check_key_existence(key, platform)
-
-        if existing_key_files:
-            msg = (f"⚠️ La clave/string '{key}' ya existe en las siguientes ubicaciones y no será sobrescrita:\n"
-                   + "\n".join(existing_key_files)
-                   + "\n\nLa traducción continuará para las ubicaciones donde la clave/string no existe.")
-            self.view.show_info_message("Clave/String existente en algunas ubicaciones", msg)
 
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
         self.view.set_progress_bar_format("Traduciendo y agregando: %p%")
 
-        self.worker_thread = WorkerThread(
-            operation_type="translate_and_add",
-            core_instance=self.model,
-            data={
-                'base_lang': base_lang,
-                'original_text': original_text,
-                'key': key,
-                'desc': desc,
-                'existing_key_files': existing_key_files,
-                'platform': platform
-            }
-        )
-        self.worker_thread.progress_updated.connect(self.view.update_progress_bar)
-        self.worker_thread.log_message.connect(self.view.append_log)
-        self.worker_thread.operation_finished.connect(self._on_worker_finished)
-        self.worker_thread.error_occurred.connect(self._on_worker_error)
-        self.worker_thread.start()
+        payload = {
+            'base_lang': base_lang,
+            'original_text': original_text,
+            'key': key,
+            'desc': desc,
+            'existing_key_files': [],  # opcional: mantener compatibilidad con tu core
+            'platform': platform
+        }
+        self.sig_translate_and_add.emit(payload)
 
     def _handle_create_assets(self, platform):
-        """Maneja la solicitud de creación de archivos/carpetas de idioma."""
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
         self.view.set_progress_bar_format("Creando archivos/carpetas: %p%")
-        
-        if platform == "flutter":
-            self.model.create_flutter_language_files()
-        elif platform == "kotlin":
-            self.model.create_kotlin_language_folders()
-        
-        self.view.update_progress_bar(100)
-        self.view.update_progress_bar(0) # Reset
-        self._update_ui_state()
+        self.sig_create_assets.emit(platform)
 
     def _handle_delete_assets(self, platform):
-        """Maneja la solicitud de eliminación de archivos/carpetas de idioma."""
-        # La confirmación ya se hizo en la vista (_confirm_delete_assets)
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
         self.view.set_progress_bar_format("Eliminando archivos/carpetas: %p%")
-
-        if platform == "flutter":
-            self.model.delete_flutter_language_files()
-        elif platform == "kotlin":
-            self.model.delete_kotlin_language_folders()
-        
-        self.view.update_progress_bar(100)
-        self.view.update_progress_bar(0) # Reset
-        self._update_ui_state()
+        self.sig_delete_assets.emit(platform)
 
     def _handle_delete_key(self, key, platform):
-        """Maneja la solicitud de eliminación de una clave/string."""
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
         self.view.set_progress_bar_format("Eliminando clave/string: %p%")
-
-        self.worker_thread = WorkerThread(
-            operation_type="delete_key",
-            core_instance=self.model,
-            data={'key': key, 'platform': platform}
-        )
-        self.worker_thread.progress_updated.connect(self.view.update_progress_bar)
-        self.worker_thread.log_message.connect(self.view.append_log)
-        self.worker_thread.operation_finished.connect(self._on_worker_finished)
-        self.worker_thread.error_occurred.connect(self._on_worker_error)
-        self.worker_thread.start()
+        self.sig_delete_key.emit({'key': key, 'platform': platform})
 
     def _handle_flutter_intl_generate(self):
-        """Maneja la solicitud de ejecutar 'dart run intl_utils:generate'."""
         self.view.append_log("Iniciando comando 'dart run intl_utils:generate'...")
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
         self.view.set_progress_bar_format("Ejecutando comando: %p%")
-
-        self.worker_thread = WorkerThread(
-            operation_type="run_flutter_intl_generate",
-            core_instance=self.model,
-            data={}
-        )
-        self.worker_thread.progress_updated.connect(self.view.update_progress_bar)
-        self.worker_thread.log_message.connect(self.view.append_log)
-        self.worker_thread.command_output.connect(self.view.append_log)
-        self.worker_thread.operation_finished.connect(self._on_worker_finished)
-        self.worker_thread.error_occurred.connect(self._on_worker_error)
-        self.worker_thread.start()
+        self.sig_flutter_generate.emit()
 
     def _handle_undo_action(self):
-        """Maneja la solicitud de deshacer la última acción."""
-        last_action = self.model.get_history()[-1] if self.model.get_history() else None
-
-        if not last_action:
-            self.view.append_log("⚠️ No hay acciones en el historial para deshacer.")
-            self._update_ui_state() # Asegurarse de que el botón esté deshabilitado
-            return
-
-        action_type = last_action['type']
-        data = last_action['data']
-        platform = last_action['platform']
-
-        self.view.append_log(f"Intentando deshacer la acción: {action_type} en {platform.upper()}...")
-        self.view.set_ui_enabled(False)
-        self.view.update_progress_bar(0)
-        self.view.set_progress_bar_format(f"Deshaciendo acción ({platform.upper()}): %p%")
-
-        try:
-            if action_type == 'add_key':
-                key_to_delete = data['key']
-                self.model.undo_delete_key_action(key_to_delete, platform)
-                self.model.pop_last_history_entry()
-                self.view.append_log(f"✅ Acción 'add_key' deshecha para '{key_to_delete}' en {platform.upper()}.")
-
-            elif action_type == 'delete_key':
-                key_to_restore = data['key']
-                deleted_content = data['deleted_content_per_file']
-                self.model.undo_add_key_action(key_to_restore, deleted_content, platform)
-                self.model.pop_last_history_entry()
-                self.view.append_log(f"✅ Acción 'delete_key' deshecha para '{key_to_restore}' en {platform.upper()}.")
-
-            else:
-                self.view.append_log(f"⚠️ Tipo de acción '{action_type}' no soportado para deshacer.")
-                self.view.show_info_message("Deshacer", "Tipo de acción no soportado para deshacer.")
-
-        except Exception as e:
-            self.view.append_log(f"❌ Error al deshacer la acción: {e}")
-            self.view.show_critical_message("Error al Deshacer", f"Ocurrió un error al intentar deshacer: {e}")
-        finally:
-            self.view.update_progress_bar(0)
-            self._update_ui_state() # Re-habilitar UI y actualizar estado del botón deshacer
+        # Marca que el próximo historial que llegue será para deshacer
+        self._pending_undo = True
+        self.sig_get_history.emit()
 
     def _handle_show_history(self):
-        """Maneja la solicitud de mostrar el historial."""
-        history_data = self.model.get_history()
-        self.view.show_history_dialog(history_data)
+        # Marca que el próximo historial que llegue será para mostrar
+        self._pending_show_history = True
+        self.sig_get_history.emit()
 
     def _handle_navigation_selection(self, item_text):
-        """
-        Maneja la selección de un elemento del menú de navegación.
-        Aquí se puede añadir lógica para cargar diferentes vistas/páginas.
-        """
         self.view.append_log(f"Navegación seleccionada: {item_text}")
-        # En este punto, si tuvieras más páginas, podrías hacer:
-        # if item_text == "Traductor":
-        #     self.view.stacked_widget.setCurrentIndex(0)
-        # elif item_text == "Otra Opción 1":
-        #     self.view.stacked_widget.setCurrentIndex(1)
-        # etc.
-        # Por ahora, el setCurrentIndex ya se maneja en la vista.
+        # Si tu vista usa stacked_widget, probablemente ya lo maneja internamente.
 
+    # ================= Callbacks de Worker =================
+
+    @Slot(dict)
     def _on_worker_finished(self, result_data):
-        """Callback cuando un WorkerThread termina exitosamente."""
-        self.view.append_log(f"Operación '{result_data.get('type', 'desconocida')}' finalizada para {result_data.get('platform', 'desconocida').upper()}.")
+        t = result_data.get('type', 'desconocida')
+        p = result_data.get('platform', 'desconocida')
+        p = p.upper() if isinstance(p, str) else str(p)
+        self.view.append_log(f"Operación '{t}' finalizada para {p}.")
         self.view.update_progress_bar(0)
-        self._update_ui_state() # Re-habilitar UI y actualizar estado del botón deshacer
+        self._update_ui_state()
 
+    @Slot(str)
     def _on_worker_error(self, message):
-        """Callback cuando un WorkerThread reporta un error."""
         self.view.append_log(message)
         self.view.show_critical_message("Error de Operación", message)
         self.view.update_progress_bar(0)
-        self._update_ui_state() # Re-habilitar UI y actualizar estado del botón deshacer
+        self._update_ui_state()
+
+    @Slot(list)
+    def _on_history_ready(self, history_data):
+        # Habilita/Deshabilita Undo según historial
+        has_history = bool(history_data)
+        self.view.undo_btn.setEnabled(has_history)
+
+        # ¿Debemos mostrar historial?
+        if self._pending_show_history:
+            self._pending_show_history = False
+            self.view.show_history_dialog(history_data)
+
+        # ¿Debemos deshacer la última acción?
+        if self._pending_undo:
+            self._pending_undo = False
+            last_action = history_data[-1] if history_data else None
+            if not last_action:
+                self.view.append_log("⚠️ No hay acciones en el historial para deshacer.")
+                self._update_ui_state()
+                return
+
+            action_type = last_action.get('type')
+            platform = last_action.get('platform')
+            payload = last_action.get('data', {})
+
+            self.view.append_log(f"Intentando deshacer la acción: {action_type} en {platform.upper()}...")
+            self.view.set_ui_enabled(False)
+            self.view.update_progress_bar(0)
+            self.view.set_progress_bar_format(f"Deshaciendo acción ({platform.upper()}): %p%")
+
+            self.sig_undo_last.emit({
+                'action_type': action_type,
+                'payload': payload,
+                'platform': platform
+            })
+
+    # ================= Shutdown =================
+
+    def _shutdown(self):
+        # Parar el hilo con seguridad
+        self.thread.quit()
+        self.thread.wait()
+
+    # ================= Logging helper =================
+
+    def thread_safe_log(self, msg: str):
+        self.log_signal.emit(msg)
