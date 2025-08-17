@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="320" viewBox="0 0 512 320"
+     style="--bg:#0b1020; --panel:#111827; --chip:#0f172a; --primary:#4f46e5; --accent:#22d3ee; --muted:#9ca3af; --text:#e5e7eb;">
+  <title>Ilustración de sistema de traducción</title>
+  <desc>Interfaz con dos burbujas de texto (A y あ) y flechas bidireccionales simbolizando traducción entre idiomas.</desc>
+
+  <defs>
+    <!-- Flecha estándar -->
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="currentColor"/>
+    </marker>
+    <!-- Sombra suave -->
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Fondo -->
+  <rect x="0" y="0" width="512" height="320" fill="var(--bg)"/>
+
+  <!-- Panel principal -->
+  <rect x="24" y="24" width="464" height="272" rx="16" fill="var(--panel)" filter="url(#softShadow)"/>
+
+  <!-- Barra superior / chips de idioma -->
+  <g transform="translate(40,44)" font-family="system-ui,Segoe UI,Roboto,Ubuntu,Arial,sans-serif" font-size="14" fill="var(--text)">
+    <rect x="0" y="0" width="56" height="28" rx="14" fill="var(--chip)" stroke="var(--primary)"/>
+    <text x="28" y="15" text-anchor="middle" dominant-baseline="central">EN</text>
+
+    <rect x="66" y="0" width="56" height="28" rx="14" fill="var(--chip)" stroke="var(--muted)"/>
+    <text x="94" y="15" text-anchor="middle" dominant-baseline="central">ES</text>
+
+    <rect x="132" y="0" width="72" height="28" rx="14" fill="var(--chip)" stroke="var(--muted)"/>
+    <text x="168" y="15" text-anchor="middle" dominant-baseline="central">Auto</text>
+
+    <!-- Indicador de estado -->
+    <circle cx="394" cy="14" r="6" fill="var(--accent)"/>
+    <text x="410" y="15" font-size="12" fill="var(--muted)" dominant-baseline="central">Online</text>
+  </g>
+
+  <!-- Burbujas de texto -->
+  <g font-family="system-ui,Segoe UI,Roboto,Ubuntu,Arial,sans-serif">
+    <!-- Izquierda: origen -->
+    <rect x="72" y="112" width="160" height="88" rx="12" fill="#0f172a" stroke="var(--muted)"/>
+    <text x="152" y="156" font-size="40" fill="var(--text)" text-anchor="middle" dominant-baseline="central">A</text>
+    <text x="152" y="188" font-size="12" fill="var(--muted)" text-anchor="middle" dominant-baseline="central">Origen</text>
+
+    <!-- Derecha: destino -->
+    <rect x="280" y="112" width="160" height="88" rx="12" fill="#0f172a" stroke="var(--muted)"/>
+    <text x="360" y="156" font-size="40" fill="var(--text)" text-anchor="middle" dominant-baseline="central">あ</text>
+    <text x="360" y="188" font-size="12" fill="var(--muted)" text-anchor="middle" dominant-baseline="central">Destino</text>
+  </g>
+
+  <!-- Flechas de traducción -->
+  <g stroke-width="3" fill="none">
+    <!-- A → あ -->
+    <path d="M232,148 C270,120 310,120 348,148" stroke="var(--primary)" marker-end="url(#arrow)" style="color:var(--primary)"/>
+    <!-- あ → A -->
+    <path d="M280,176 C242,204 202,204 164,176" stroke="var(--accent)" marker-end="url(#arrow)" style="color:var(--accent)"/>
+  </g>
+
+  <!-- Pie con 'API' y 'AI' para sugerir sistema -->
+  <g transform="translate(40,266)" font-family="system-ui,Segoe UI,Roboto,Ubuntu,Arial,sans-serif" font-size="12" fill="var(--muted)">
+    <rect x="0" y="0" width="54" height="24" rx="6" fill="#0f172a" stroke="var(--muted)"/>
+    <text x="27" y="12" text-anchor="middle" dominant-baseline="central">API</text>
+
+    <rect x="64" y="0" width="50" height="24" rx="6" fill="#0f172a" stroke="var(--muted)"/>
+    <text x="89" y="12" text-anchor="middle" dominant-baseline="central">AI</text>
+
+    <text x="138" y="12" dominant-baseline="central">· Traducción en tiempo real</text>
+  </g>
+</svg>

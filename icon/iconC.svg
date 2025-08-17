@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000" viewBox="0 0 1000 1000"
+     style="--bg:#0b1020; --panel:#111827; --chip:#0f172a; --primary:#4f46e5; --accent:#22d3ee; --muted:#9ca3af; --text:#e5e7eb;">
+  <title>Sistema de traducción (versión 1000×1000)</title>
+  <desc>Interfaz cuadrada con dos burbujas A y あ, flechas bidireccionales y chips de idioma.</desc>
+
+  <defs>
+    <marker id="arrow" markerWidth="18" markerHeight="18" refX="16" refY="9" orient="auto">
+      <path d="M0,0 L18,9 L0,18 Z" fill="currentColor"/>
+    </marker>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="8" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Fondo -->
+  <rect x="0" y="0" width="1000" height="1000" fill="var(--bg)"/>
+
+  <!-- Panel -->
+  <rect x="80" y="80" width="840" height="840" rx="28" fill="var(--panel)" filter="url(#softShadow)"/>
+
+  <!-- Barra superior / idiomas -->
+  <g transform="translate(120,120)" font-family="system-ui,Segoe UI,Roboto,Ubuntu,Arial,sans-serif" fill="var(--text)">
+    <rect x="0" y="0" width="80" height="36" rx="18" fill="var(--chip)" stroke="var(--primary)"/>
+    <text x="40" y="18" font-size="16" text-anchor="middle" dominant-baseline="central">EN</text>
+
+    <rect x="92" y="0" width="80" height="36" rx="18" fill="var(--chip)" stroke="var(--muted)"/>
+    <text x="132" y="18" font-size="16" text-anchor="middle" dominant-baseline="central">ES</text>
+
+    <rect x="184" y="0" width="110" height="36" rx="18" fill="var(--chip)" stroke="var(--muted)"/>
+    <text x="239" y="18" font-size="16" text-anchor="middle" dominant-baseline="central">Auto</text>
+
+    <circle cx="740" cy="18" r="9" fill="var(--accent)"/>
+    <text x="760" y="18" font-size="14" fill="var(--muted)" dominant-baseline="central">Online</text>
+  </g>
+
+  <!-- Burbujas -->
+  <g font-family="system-ui,Segoe UI,Roboto,Ubuntu,Arial,sans-serif">
+    <!-- Origen -->
+    <rect x="160" y="380" width="300" height="220" rx="24" fill="#0f172a" stroke="var(--muted)"/>
+    <text x="310" y="470" font-size="120" fill="var(--text)" text-anchor="middle" dominant-baseline="central">A</text>
+    <text x="310" y="560" font-size="18" fill="var(--muted)" text-anchor="middle" dominant-baseline="central">Origen</text>
+
+    <!-- Destino -->
+    <rect x="540" y="380" width="300" height="220" rx="24" fill="#0f172a" stroke="var(--muted)"/>
+    <text x="690" y="470" font-size="120" fill="var(--text)" text-anchor="middle" dominant-baseline="central">あ</text>
+    <text x="690" y="560" font-size="18" fill="var(--muted)" text-anchor="middle" dominant-baseline="central">Destino</text>
+  </g>
+
+  <!-- Flechas -->
+  <g stroke-width="6" fill="none">
+    <!-- A → あ (arco superior) -->
+    <path d="M460,420 C520,300 620,300 680,420"
+          stroke="var(--primary)" marker-end="url(#arrow)" style="color:var(--primary)"/>
+    <!-- あ → A (arco inferior) -->
+    <path d="M540,520 C480,640 380,640 320,520"
+          stroke="var(--accent)" marker-end="url(#arrow)" style="color:var(--accent)"/>
+  </g>
+
+  <!-- Pie -->
+  <g transform="translate(120,860)" font-family="system-ui,Segoe UI,Roboto,Ubuntu,Arial,sans-serif" fill="var(--muted)">
+    <rect x="0" y="0" width="70" height="32" rx="8" fill="#0f172a" stroke="var(--muted)"/>
+    <text x="35" y="16" font-size="14" text-anchor="middle" dominant-baseline="central">API</text>
+
+    <rect x="84" y="0" width="64" height="32" rx="8" fill="#0f172a" stroke="var(--muted)"/>
+    <text x="116" y="16" font-size="14" text-anchor="middle" dominant-baseline="central">AI</text>
+
+    <text x="168" y="16" font-size="14" dominant-baseline="central">· Traducción en tiempo real</text>
+  </g>
+</svg>
