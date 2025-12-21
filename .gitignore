@@ -5,4 +5,16 @@ translation_log.xlsx
 /build/
 /.vscode/
 /dist/
+/venv/
 main.spec
+
+# PyInstaller
+*.spec~
+*.pyc
+
+# Inno Setup
+/app/
+Output/
+
+# Logs
+*.log

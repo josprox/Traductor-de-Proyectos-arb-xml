@@ -20,9 +20,11 @@ Permite gestionar cadenas de texto y traducciones para aplicaciones móviles.
 
 ## Requisitos
 
-* **Python 3.x**
+* **Python 3.8+**
 * **PySide6**: Para la interfaz gráfica.
-* **`requests`**: Para la comunicación con APIs web (ej. Google Translate).
+* **openpyxl**: Para gestión de archivos Excel (logs).
+* **lxml**: Para procesamiento de archivos XML (Android).
+* **requests**: Para la comunicación con APIs web (ej. Google Translate).
 * **Flutter SDK**: Instalado y configurado en la PATH del sistema, necesario para las funcionalidades de Flutter (intl, etc.).
 
 ## Estructura del Proyecto (Versión Original)
@@ -39,20 +41,47 @@ Permite gestionar cadenas de texto y traducciones para aplicaciones móviles.
 ├── main.py
 └── README.md
 
-````
+```
 
-## Uso
+## Instalación y Configuración
 
 1.  **Clonar el repositorio** (o descargar los archivos).
-2.  **Instalar dependencias Python**:
+
+2.  **Crear un entorno virtual** (recomendado para aislar las dependencias del proyecto):
     ```bash
-    pip install PySide6 requests
+    python -m venv venv
     ```
-3.  **Asegurarse de tener Flutter SDK instalado y en la PATH.**
-4.  **Ejecutar la aplicación**:
+
+3.  **Activar el entorno virtual**:
+    
+    **Windows:**
+    ```bash
+    venv/Scripts/activate
+    ```
+    
+    **Linux/Mac:**
+    ```bash
+    source venv/bin/activate
+    ```
+
+4.  **Instalar las dependencias**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+5.  **Asegurarse de tener Flutter SDK instalado y en la PATH** (si usarás la funcionalidad de Flutter).
+
+6.  **Ejecutar la aplicación**:
     ```bash
     python main.py
     ```
+
+7.  **Para desactivar el entorno virtual** cuando termines:
+    ```bash
+    deactivate
+    ```
+
+> **Nota**: Cada vez que trabajes en el proyecto, recuerda activar el entorno virtual antes de ejecutar la aplicación.
 
 ### Interfaz de Usuario
 
