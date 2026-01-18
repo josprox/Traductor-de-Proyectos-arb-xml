@@ -7,7 +7,11 @@ import subprocess
 
 import openpyxl
 from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter
 from lxml import etree
+import concurrent.futures
+import urllib.parse
+
 
 class TranslationCore:
     """
@@ -33,7 +37,8 @@ class TranslationCore:
     ]
     KOTLIN_STRINGS_FILE_NAME = "strings-joss.xml"
 
-    API_URL = "https://jossred.josprox.com/api/traducir"
+    # API_URL eliminada, se usa lógica local con Google Translate
+    GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
     LOG_FILE = "translation_log.xlsx"
     HISTORY_FILE = "translation_history.json"
 
@@ -301,32 +306,77 @@ class TranslationCore:
 
     def fetch_translations_from_api(self, base_lang, original_text, platform):
         """
-        Realiza la llamada a la API para obtener traducciones.
-        Retorna un diccionario de traducciones o lanza una excepción en caso de error.
+        Realiza llamadas concurrentes a la API de Google Translate (gtx) para obtener traducciones.
+        Simula la respuesta que antes daba la API de Laravel.
         """
-        try:
-            if platform == "flutter":
-                langs_for_api = self.get_flutter_target_languages()
-            elif platform == "kotlin":
-                langs_for_api = self.get_kotlin_target_languages_for_api()
-            else:
-                raise ValueError("Plataforma no reconocida para la traducción.")
+        if platform == "flutter":
+            target_langs = self.get_flutter_target_languages()
+        elif platform == "kotlin":
+            target_langs = self.get_kotlin_target_languages_for_api()
+        else:
+            raise ValueError("Plataforma no reconocida para la traducción.")
 
-            response = requests.get(f"{self.API_URL}?idioma={base_lang}&texto={original_text}&traducir={','.join(langs_for_api)}")
-            response.raise_for_status()
-            data = response.json()
+        translations = {}
+        
+        # Mapeo de idiomas para la API de Google (similares a los de TranslationController.php)
+        # La mayoría coinciden, pero aseguramos la compatibilidad
+        LANGUAGE_MAP = {
+            'ar': 'ar', 'be': 'be', 'bg': 'bg', 'bn': 'bn', 'bs': 'bs', 'cs': 'cs', 'de': 'de',
+            'el': 'el', 'en': 'en', 'es': 'es', 'et': 'et', 'fa': 'fa', 'fi': 'fi', 'fr': 'fr',
+            'hi': 'hi', 'hr': 'hr', 'hu': 'hu', 'id': 'id', 'it': 'it', 'ja': 'ja', 'ko': 'ko',
+            'ml': 'ml', 'nb': 'no', 'ne': 'ne', 'nl': 'nl', 'or': 'or', 'pa': 'pa', 'pl': 'pl',
+            'pt': 'pt', 'ru': 'ru', 'sv': 'sv', 'ta': 'ta', 'tr': 'tr', 'uk': 'uk', 'vi': 'vi',
+            'zh': 'zh-CN'
+        }
 
-            if not data.get("success"):
-                raise Exception(f"API Error: {data.get('error', 'Error desconocido')}")
+        # Función auxiliar para traducir un solo idioma
+        def translate_single(target_code):
+            google_target = LANGUAGE_MAP.get(target_code, target_code)
+            
+            # Casos especiales de mapeo (según el controlador original)
+            if target_code == 'in': google_target = 'id'
+            if target_code == 'nb-rNO': google_target = 'no'
+            # Otros mapeos regionales suelen simplificarse por Google, pero enviamos el base si es simple
+            
+            try:
+                params = {
+                    'client': 'gtx',
+                    'sl': base_lang,
+                    'tl': google_target,
+                    'dt': 't',
+                    'q': original_text
+                }
+                
+                # Usar requests directamente
+                response = requests.get(self.GOOGLE_TRANSLATE_URL, params=params, timeout=10)
+                response.raise_for_status()
+                
+                # La respuesta es un array anidado: [[[ "Texto Traducido", "Texto Orig", ...], ...], ...]
+                data = response.json()
+                if data and len(data) > 0 and len(data[0]) > 0 and len(data[0][0]) > 0:
+                    return target_code, data[0][0][0]
+                else:
+                    return target_code, None
+            except Exception as e:
+                self._log(f"⚠️ Error traduciendo a {target_code}: {e}")
+                return target_code, None
 
-            translations = {t["target_language"]: t["translated_text"] for t in data.get("translations", [])}
-            return translations
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Error de conexión con la API: {e}")
-        except json.JSONDecodeError:
-            raise Exception("Error al decodificar la respuesta JSON de la API.")
-        except Exception as e:
-            raise e
+        # Ejecución paralela
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_lang = {executor.submit(translate_single, lang): lang for lang in target_langs}
+            for future in concurrent.futures.as_completed(future_to_lang):
+                lang_code = future_to_lang[future]
+                try:
+                    code, text = future.result()
+                    if text:
+                        translations[code] = text
+                    else:
+                        translations[code] = original_text # Fallback al original si falla
+                except Exception as exc:
+                    self._log(f"Completado con excepción para {lang_code}: {exc}")
+                    translations[lang_code] = original_text
+
+        return translations
 
     def add_translation_entry(self, base_lang, original_text, key, desc, translations, existing_key_files, platform):
         """
