@@ -23,6 +23,7 @@ class TranslatorAppView(QMainWindow):
     undo_requested = Signal()
     show_history_requested = Signal()
     navigation_selected = Signal(str) # Nueva señal para la selección del menú de navegación
+    translate_batch_requested = Signal(str, str, str) # content, platform, base_lang
 
     def __init__(self, initial_project_path):
         super().__init__()
@@ -37,7 +38,7 @@ class TranslatorAppView(QMainWindow):
         """
         Inicializa los elementos de la interfaz de usuario y su diseño.
         """
-        # Layout principal que contendrá el splitter
+        # Layout principal que contendrá el navbar y el panel de contenido
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_horizontal_layout = QHBoxLayout(central_widget)
@@ -46,11 +47,9 @@ class TranslatorAppView(QMainWindow):
         self.navbar_list_widget = QListWidget()
         self.navbar_list_widget.setMaximumWidth(150) # Ancho fijo para el navbar
         self.navbar_list_widget.addItem("Traductor") # Índice 0
-        # self.navbar_list_widget.addItem("Otra Opción 1") # Futuras opciones
-        # self.navbar_list_widget.addItem("Otra Opción 2") # Futuras opciones
+        self.navbar_list_widget.addItem("Modo Lote ARB/XML") # Índice 1
         
         # --- Contenido Principal (Stacked Widget) ---
-        # Inicializar stacked_widget ANTES de conectar la señal del navbar
         self.stacked_widget = QStackedWidget()
 
         # Página del Traductor (contenido existente)
@@ -144,33 +143,69 @@ class TranslatorAppView(QMainWindow):
         history_undo_layout.addWidget(self.undo_btn)
         translator_layout.addLayout(history_undo_layout)
 
-        # Barra de progreso
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setAlignment(Qt.AlignCenter)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("Progreso: %p%")
-        translator_layout.addWidget(self.progress_bar)
-
-        translator_layout.addSpacing(10)
-
-        # Consola de salida
-        translator_layout.addWidget(QLabel("Consola de salida"))
-        self.output = QTextEdit()
-        self.output.setReadOnly(True)
-        translator_layout.addWidget(self.output)
-
         # Añadir la página del traductor al stacked widget
         self.stacked_widget.addWidget(translator_page_widget) # Índice 0 para el traductor
+
+        # --- Página de Traducción por Lote (Nueva) ---
+        batch_translator_page_widget = QWidget()
+        batch_layout = QVBoxLayout(batch_translator_page_widget)
+
+        batch_layout.addWidget(QLabel("Modo Lote (Pega contenido ARB JSON o Android XML):"))
+        self.batch_text_input = QTextEdit()
+        self.batch_text_input.setPlaceholderText("Pega aquí tu contenido completo de ARB JSON o strings.xml de Android...\n\nEjemplo ARB:\n{\n  \"@@locale\": \"en\",\n  \"aiWizardTitle\": \"🚀 Joss AI Activation Wizard 🚀\"\n}\n\nEjemplo XML:\n<resources>\n  <string name=\"aiWizardTitle\">🚀 Joss AI Activation Wizard 🚀</string>\n</resources>")
+        batch_layout.addWidget(self.batch_text_input)
+
+        batch_platform_layout = QHBoxLayout()
+        batch_platform_layout.addWidget(QLabel("Plataforma:"))
+        self.batch_platform_selector = QComboBox()
+        self.batch_platform_selector.addItem("Detectar Automáticamente", "auto")
+        self.batch_platform_selector.addItem("Flutter (ARB)", "flutter")
+        self.batch_platform_selector.addItem("Kotlin/Android (XML)", "kotlin")
+        batch_platform_layout.addWidget(self.batch_platform_selector)
+
+        batch_platform_layout.addWidget(QLabel("Idioma base:"))
+        self.batch_base_lang_input = QLineEdit()
+        self.batch_base_lang_input.setPlaceholderText("Autodetectar o ej. 'en', 'es'")
+        self.batch_base_lang_input.setMaximumWidth(160)
+        batch_platform_layout.addWidget(self.batch_base_lang_input)
+        batch_platform_layout.addStretch()
+        batch_layout.addLayout(batch_platform_layout)
+
+        self.batch_translate_btn = QPushButton("Procesar y Traducir Lote")
+        self.batch_translate_btn.clicked.connect(self._emit_translate_batch_request)
+        batch_layout.addWidget(self.batch_translate_btn)
+
+        self.stacked_widget.addWidget(batch_translator_page_widget) # Índice 1 para el traductor de lote
 
         # Conectar la selección del navbar a una función que emita la señal
         self.navbar_list_widget.currentRowChanged.connect(self._on_navbar_selection_changed)
         # Establecer la fila actual DESPUÉS de que stacked_widget esté inicializado y tenga widgets
         self.navbar_list_widget.setCurrentRow(0) # Seleccionar "Traductor" por defecto
 
+        # --- Panel Derecho (Contenedor de Stacked Widget, Progress Bar y Consola Globales) ---
+        right_panel_widget = QWidget()
+        right_panel_layout = QVBoxLayout(right_panel_widget)
+        right_panel_layout.setContentsMargins(0, 0, 0, 0)
 
-        # --- Añadir navbar y stacked widget al layout principal ---
+        # Añadir el stacked widget al panel derecho
+        right_panel_layout.addWidget(self.stacked_widget, 1) # Usar factor de estiramiento 1
+
+        # Barra de progreso (compartida)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setAlignment(Qt.AlignCenter)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Progreso: %p%")
+        right_panel_layout.addWidget(self.progress_bar)
+
+        # Consola de salida (compartida)
+        right_panel_layout.addWidget(QLabel("Consola de salida"))
+        self.output = QTextEdit()
+        self.output.setReadOnly(True)
+        right_panel_layout.addWidget(self.output)
+
+        # --- Añadir navbar y panel derecho al layout principal ---
         main_horizontal_layout.addWidget(self.navbar_list_widget)
-        main_horizontal_layout.addWidget(self.stacked_widget)
+        main_horizontal_layout.addWidget(right_panel_widget)
 
     def _on_navbar_selection_changed(self, row):
         """
@@ -230,7 +265,6 @@ class TranslatorAppView(QMainWindow):
     def set_progress_bar_format(self, format_string):
         """Establece el formato del texto de la barra de progreso."""
         self.progress_bar.setFormat(format_string)
-
     def set_ui_enabled(self, enabled):
         """Habilita o deshabilita todos los botones e inputs principales de la UI."""
         self.translate_button.setEnabled(enabled)
@@ -245,6 +279,16 @@ class TranslatorAppView(QMainWindow):
         self.platform_selector.setEnabled(enabled)
         self.select_folder_btn.setEnabled(enabled)
         
+        # Batch Mode UI elements
+        if hasattr(self, 'batch_translate_btn'):
+            self.batch_translate_btn.setEnabled(enabled)
+        if hasattr(self, 'batch_text_input'):
+            self.batch_text_input.setEnabled(enabled)
+        if hasattr(self, 'batch_platform_selector'):
+            self.batch_platform_selector.setEnabled(enabled)
+        if hasattr(self, 'batch_base_lang_input'):
+            self.batch_base_lang_input.setEnabled(enabled)
+
         # El botón de Flutter Intl Generate solo se habilita si la plataforma es Flutter
         self.flutter_intl_generate_btn.setEnabled(enabled and self._current_platform == "flutter")
         self.undo_btn.setEnabled(enabled) # El controlador gestionará si hay historial o no
@@ -290,6 +334,13 @@ class TranslatorAppView(QMainWindow):
                 elif action_type == 'delete_key':
                     key = data.get('key', 'N/A')
                     display_text += f" - Clave/String: '{key}'"
+                elif action_type == 'batch_add_keys':
+                    affected = data.get('affected_files', {})
+                    num_files = len(affected)
+                    # Count total keys in the first file as a representative
+                    first_file = next(iter(affected.values())) if affected else {}
+                    num_keys = len(first_file)
+                    display_text += f" - Traducción Lote: {num_keys} keys en {num_files} archivos"
 
                 history_list_widget.addItem(display_text)
 
@@ -322,3 +373,13 @@ class TranslatorAppView(QMainWindow):
             self.flutter_intl_generate_btn.hide()
         # Asegurar que el estado de los botones se actualice después de cambiar la visibilidad
         self.set_ui_enabled(True) # Se re-habilitarán y el controlador ajustará el estado final
+
+    def _emit_translate_batch_request(self):
+        """Emite la señal de traducción por lote."""
+        content = self.batch_text_input.toPlainText().strip()
+        platform = self.batch_platform_selector.currentData()
+        base_lang = self.batch_base_lang_input.text().strip()
+        if not content:
+            self.append_log("⚠️ Por favor pega algún contenido JSON/XML para traducir.")
+            return
+        self.translate_batch_requested.emit(content, platform, base_lang)

@@ -150,12 +150,91 @@ class TranslationWorker(QObject):
                 self.core.undo_add_key_action(key_to_restore, deleted_content, platform)
                 self.core.pop_last_history_entry()
                 self._thread_safe_log(f"✅ Acción 'delete_key' deshecha para '{key_to_restore}' en {platform.upper()}.")
+            elif action_type == 'batch_add_keys':
+                self.core.undo_batch_add_keys_action(payload, platform)
+                self.core.pop_last_history_entry()
+                self._thread_safe_log(f"✅ Lote de traducciones deshecho en {platform.upper()}.")
             else:
                 self._thread_safe_log(f"⚠️ Tipo de acción '{action_type}' no soportado para deshacer.")
 
             self.operation_finished.emit({'type': 'undo', 'platform': platform})
         except Exception as e:
             self.error_occurred.emit(f"❌ Error deshaciendo acción: {e}")
+        finally:
+            self.progress_updated.emit(100)
+
+    @Slot(dict)
+    def do_translate_batch(self, data):
+        """
+        data esperado:
+        {
+            'content': str,
+            'platform': str,
+            'base_lang': str
+        }
+        """
+        try:
+            self.log_message.emit("Iniciando procesamiento de lote...")
+            self.progress_updated.emit(0)
+
+            # 1. Parsear el contenido
+            detected_platform, detected_base, key_values, descriptions = self.core.parse_batch_content(data['content'])
+            
+            # Determinar plataforma
+            platform = data['platform']
+            if platform == 'auto':
+                platform = detected_platform
+            
+            # Determinar idioma base
+            base_lang = data['base_lang']
+            if not base_lang:
+                base_lang = detected_base
+            if not base_lang:
+                base_lang = 'en' # fallback por defecto
+            
+            self.log_message.emit(f"✓ Formato detectado: {platform.upper()}, Idioma Base: {base_lang}")
+            self.log_message.emit(f"✓ Claves encontradas para procesar: {len(key_values)}")
+
+            if not key_values:
+                raise ValueError("No se encontraron claves válidas para traducir en el contenido proporcionado.")
+
+            # 2. Traducir cada clave
+            total_keys = len(key_values)
+            batch_translations = {} # { lang: { key: value } }
+            
+            # Inicializar los diccionarios de traducciones por idioma
+            if platform == "flutter":
+                target_langs = self.core.get_flutter_target_languages()
+            else:
+                target_langs = self.core.get_kotlin_target_languages_for_api()
+
+            for lang in target_langs:
+                batch_translations[lang] = {}
+
+            # Traducir clave a clave e ir actualizando el progreso
+            for idx, (key, original_text) in enumerate(key_values.items()):
+                self.log_message.emit(f"Traduciendo [{idx + 1}/{total_keys}]: '{key}' -> '{original_text[:30]}...'")
+                
+                # Traduce esta clave a todos los idiomas de destino
+                key_translations = self.core.fetch_translations_from_api(base_lang, original_text, platform)
+                
+                # Guardar las traducciones en nuestra estructura por lote
+                for lang, translated_text in key_translations.items():
+                    batch_translations[lang][key] = translated_text
+                
+                # Actualizar el progreso (reservando el 90% para traducción, 10% para guardado final)
+                progress = int((idx + 1) / total_keys * 90)
+                self.progress_updated.emit(progress)
+
+            # 3. Guardar en lote
+            self.log_message.emit("Escribiendo traducciones en los archivos de idioma...")
+            self.core.add_translation_batch(base_lang, batch_translations, descriptions, platform)
+            
+            self.log_message.emit("✅ Proceso de traducción por lote finalizado con éxito.")
+            self.operation_finished.emit({'type': 'translate_batch', 'platform': platform})
+
+        except Exception as e:
+            self.error_occurred.emit(f"❌ Error en 'translate_batch': {e}")
         finally:
             self.progress_updated.emit(100)
 

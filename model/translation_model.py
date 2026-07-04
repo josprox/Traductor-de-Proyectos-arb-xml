@@ -4,6 +4,8 @@ import requests
 import csv
 from datetime import datetime
 import subprocess
+import re
+
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -11,6 +13,9 @@ from openpyxl.utils import get_column_letter
 from lxml import etree
 import concurrent.futures
 import urllib.parse
+
+PLACEHOLDER_REGEX = re.compile(r'(%[0-9]+\$[0-9]*\.?[0-9]*[dsfpxXgGeE@]|%[0-9]*\.?[0-9]*[dsfpxXgGeE@]|\{[a-zA-Z0-9_]+\})')
+RESTORE_REGEX = re.compile(r'___\s*[pP][hH]\s*_\s*(\d+)\s*___')
 
 
 class TranslationCore:
@@ -304,6 +309,30 @@ class TranslationCore:
                         self._log(f"❌ Error al verificar '{full_path}': {e}")
         return existing_key_locations
 
+    def protect_placeholders(self, text):
+        if not text:
+            return text, []
+        placeholders = []
+        def replace_match(match):
+            ph = match.group(0)
+            placeholders.append(ph)
+            return f"___PH_{len(placeholders) - 1}___"
+        
+        protected_text = PLACEHOLDER_REGEX.sub(replace_match, text)
+        return protected_text, placeholders
+
+    def restore_placeholders(self, text, placeholders):
+        if not text or not placeholders:
+            return text
+        
+        def restore_match(match):
+            index = int(match.group(1))
+            if index < len(placeholders):
+                return placeholders[index]
+            return match.group(0)
+            
+        return RESTORE_REGEX.sub(restore_match, text)
+
     def fetch_translations_from_api(self, base_lang, original_text, platform):
         """
         Realiza llamadas concurrentes a la API de Google Translate (gtx) para obtener traducciones.
@@ -329,6 +358,9 @@ class TranslationCore:
             'zh': 'zh-CN'
         }
 
+        # Proteger placeholders antes de enviar a traducir
+        protected_text, placeholders = self.protect_placeholders(original_text)
+
         # Función auxiliar para traducir un solo idioma
         def translate_single(target_code):
             google_target = LANGUAGE_MAP.get(target_code, target_code)
@@ -344,7 +376,7 @@ class TranslationCore:
                     'sl': base_lang,
                     'tl': google_target,
                     'dt': 't',
-                    'q': original_text
+                    'q': protected_text
                 }
                 
                 # Usar requests directamente
@@ -354,7 +386,9 @@ class TranslationCore:
                 # La respuesta es un array anidado: [[[ "Texto Traducido", "Texto Orig", ...], ...], ...]
                 data = response.json()
                 if data and len(data) > 0 and len(data[0]) > 0 and len(data[0][0]) > 0:
-                    return target_code, data[0][0][0]
+                    translated = data[0][0][0]
+                    restored = self.restore_placeholders(translated, placeholders)
+                    return target_code, restored
                 else:
                     return target_code, None
             except Exception as e:
@@ -748,3 +782,238 @@ class TranslationCore:
                 self._log(f"⚠️ Error al leer '{current_path}'. Archivo JSON/XML inválido (para deshacer).")
             except Exception as e:
                 self._log(f"❌ Error al restaurar '{key_to_restore}' en '{current_path}' (deshacer): {e}")
+
+    def parse_batch_content(self, content):
+        """
+        Detecta el formato (ARB JSON o Android XML) y lo analiza para extraer claves y valores.
+        Retorna: (platform, base_lang, key_values, descriptions)
+        """
+        content_stripped = content.strip()
+        if content_stripped.startswith("<") or "<resources" in content_stripped or "<string" in content_stripped:
+            # Es XML de Android / Kotlin
+            try:
+                clean_content = content_stripped
+                if "<?xml" in clean_content:
+                    clean_content = re.sub(r'<\?xml.*?\?>', '', clean_content).strip()
+                
+                if not clean_content.startswith("<resources"):
+                    clean_content = f"<resources>{clean_content}</resources>"
+                
+                parser = etree.XMLParser(remove_blank_text=True, remove_comments=False)
+                root = etree.fromstring(clean_content.encode('utf-8'), parser)
+                
+                key_values = {}
+                for child in root.xpath("string"):
+                    name = child.get("name")
+                    if name:
+                        text = "".join(child.itertext()) if child.itertext() else (child.text or "")
+                        key_values[name] = text
+                
+                return "kotlin", None, key_values, {}
+            except Exception as e:
+                raise ValueError(f"Error al parsear el XML de Android: {e}")
+        else:
+            # Es ARB JSON de Flutter
+            try:
+                data = json.loads(content_stripped)
+                base_lang = data.get("@@locale")
+                key_values = {}
+                descriptions = {}
+                for k, v in data.items():
+                    if k.startswith("@@"):
+                        continue
+                    if k.startswith("@"):
+                        real_key = k[1:]
+                        if isinstance(v, dict) and "description" in v:
+                            descriptions[real_key] = v["description"]
+                    else:
+                        if isinstance(v, str):
+                            key_values[k] = v
+                return "flutter", base_lang, key_values, descriptions
+            except Exception as e:
+                raise ValueError(f"Error al parsear el JSON de ARB: {e}")
+
+    def add_translation_batch(self, base_lang, batch_translations, descriptions, platform):
+        """
+        Añade un lote de traducciones a los archivos correspondientes.
+        Retorna los datos para el historial (deshacer).
+        """
+        undo_data = {
+            'affected_files': {}
+        }
+
+        if platform == "flutter":
+            target_assets = self.FLUTTER_LANGUAGE_FILES
+        elif platform == "kotlin":
+            target_assets = self.KOTLIN_LANGUAGE_FOLDERS
+        else:
+            raise ValueError(f"Plataforma desconocida: {platform}")
+
+        for asset_name in target_assets:
+            if platform == "flutter":
+                current_path = os.path.join(self.project_path, asset_name)
+                lang = asset_name.split('_')[1].split('.')[0]
+            elif platform == "kotlin":
+                current_path = os.path.join(self.project_path, asset_name, self.KOTLIN_STRINGS_FILE_NAME)
+                lang = "en" if asset_name == "values" else asset_name.replace("values-", "")
+
+            # Obtener traducciones para este idioma específico
+            lang_translations = batch_translations.get(lang, {})
+            if not lang_translations and '-r' in lang:
+                simple_lang = lang.split('-r')[0]
+                lang_translations = batch_translations.get(simple_lang, {})
+
+            if not lang_translations:
+                continue
+
+            if not os.path.exists(os.path.dirname(current_path)):
+                os.makedirs(os.path.dirname(current_path), exist_ok=True)
+
+            if not os.path.exists(current_path):
+                if platform == "flutter":
+                    with open(current_path, "w", encoding="utf-8") as f:
+                        json.dump({"@@locale": lang}, f, indent=2, ensure_ascii=False)
+                elif platform == "kotlin":
+                    with open(current_path, "w", encoding="utf-8") as f:
+                        f.write("<?xml version='1.0' encoding='UTF-8'?>\n<resources>\n\n</resources>")
+
+            try:
+                undo_data['affected_files'][asset_name] = {}
+                
+                if platform == "flutter":
+                    with open(current_path, "r", encoding="utf-8") as f:
+                        arb_data = json.load(f)
+
+                    for key, text in lang_translations.items():
+                        # Guardar estado anterior para deshacer
+                        undo_data['affected_files'][asset_name][key] = {
+                            'old_value': arb_data.get(key),
+                            'old_desc': arb_data.get(f"@{key}", {}).get("description")
+                        }
+                        
+                        arb_data[key] = text
+                        desc = descriptions.get(key)
+                        if desc:
+                            arb_data[f"@{key}"] = {"description": desc}
+
+                    with open(current_path, "w", encoding="utf-8") as f:
+                        json.dump(arb_data, f, indent=2, ensure_ascii=False)
+                    self._log(f"✅ Lote de traducciones añadido en {asset_name} (Flutter)")
+
+                elif platform == "kotlin":
+                    parser = etree.XMLParser(remove_blank_text=True, remove_comments=False)
+                    tree = etree.parse(current_path, parser)
+                    root = tree.getroot()
+
+                    for key, text in lang_translations.items():
+                        existing_string_element = root.xpath(f"string[@name='{key}']")
+                        
+                        # Guardar estado anterior para deshacer
+                        if existing_string_element:
+                            undo_data['affected_files'][asset_name][key] = {
+                                'old_value': existing_string_element[0].text,
+                                'old_desc': None
+                            }
+                            existing_string_element[0].text = text
+                        else:
+                            undo_data['affected_files'][asset_name][key] = {
+                                'old_value': None,
+                                'old_desc': None
+                            }
+                            new_string = etree.Element("string", name=key)
+                            new_string.text = text
+                            root.append(new_string)
+
+                    formatted_xml = etree.tostring(
+                        root,
+                        encoding="utf-8",
+                        xml_declaration=True,
+                        pretty_print=True
+                    ).decode("utf-8")
+                    if not formatted_xml.endswith("\n"):
+                        formatted_xml += "\n"
+
+                    with open(current_path, "w", encoding="utf-8") as f:
+                        f.write(formatted_xml)
+                    self._log(f"✅ Lote de traducciones añadido en {asset_name}/{self.KOTLIN_STRINGS_FILE_NAME} (Kotlin)")
+
+            except Exception as e:
+                self._log(f"❌ Error al procesar '{current_path}' en lote: {e}")
+
+        # Se registra el lote con un texto genérico de resumen en el log
+        num_keys = len(descriptions) if descriptions else len(list(batch_translations.values())[0]) if batch_translations else 0
+        self._log_action(base_lang, f"[Lote de {num_keys} strings]", "Varios", "", "Traducción Lote", platform)
+        self.add_to_history('batch_add_keys', undo_data, platform)
+        return undo_data
+
+    def undo_batch_add_keys_action(self, payload, platform):
+        """
+        Deshace un lote completo de traducciones.
+        """
+        affected_files = payload.get('affected_files', {})
+        for asset_name, keys_data in affected_files.items():
+            if platform == "flutter":
+                current_path = os.path.join(self.project_path, asset_name)
+            elif platform == "kotlin":
+                current_path = os.path.join(self.project_path, asset_name, self.KOTLIN_STRINGS_FILE_NAME)
+            else:
+                continue
+
+            if not os.path.exists(current_path):
+                continue
+
+            try:
+                if platform == "flutter":
+                    with open(current_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+
+                    for key, values in keys_data.items():
+                        old_val = values.get('old_value')
+                        old_desc = values.get('old_desc')
+                        if old_val is None:
+                            data.pop(key, None)
+                            data.pop(f"@{key}", None)
+                        else:
+                            data[key] = old_val
+                            if old_desc:
+                                data[f"@{key}"] = {"description": old_desc}
+                            else:
+                                data.pop(f"@{key}", None)
+
+                    with open(current_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    self._log(f"🗑️ Revertido lote en {asset_name} (Flutter).")
+
+                elif platform == "kotlin":
+                    parser = etree.XMLParser(remove_blank_text=True, remove_comments=False)
+                    tree = etree.parse(current_path, parser)
+                    root = tree.getroot()
+
+                    for key, values in keys_data.items():
+                        old_val = values.get('old_value')
+                        target_string = root.xpath(f"string[@name='{key}']")
+                        if old_val is None:
+                            if target_string:
+                                root.remove(target_string[0])
+                        else:
+                            if target_string:
+                                target_string[0].text = old_val
+                            else:
+                                new_string = etree.Element("string", name=key)
+                                new_string.text = old_val
+                                root.append(new_string)
+
+                    formatted_xml = etree.tostring(
+                        root,
+                        encoding="utf-8",
+                        xml_declaration=True,
+                        pretty_print=True
+                    ).decode("utf-8")
+                    if not formatted_xml.endswith("\n"):
+                        formatted_xml += "\n"
+                    with open(current_path, "w", encoding="utf-8") as f:
+                        f.write(formatted_xml)
+                    self._log(f"🗑️ Revertido lote en {asset_name}/{self.KOTLIN_STRINGS_FILE_NAME} (Kotlin).")
+
+            except Exception as e:
+                self._log(f"❌ Error al deshacer lote en '{asset_name}': {e}")

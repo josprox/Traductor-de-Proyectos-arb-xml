@@ -24,6 +24,7 @@ class TranslatorAppController(QObject):
     sig_get_history = Signal()
     sig_undo_last = Signal(dict)
     sig_set_project_path = Signal(str)
+    sig_translate_batch = Signal(dict)
 
     def __init__(self, app_instance):
         super().__init__()
@@ -68,6 +69,7 @@ class TranslatorAppController(QObject):
         self.sig_get_history.connect(self.worker.do_get_history, Qt.QueuedConnection)
         self.sig_undo_last.connect(self.worker.do_undo_last, Qt.QueuedConnection)
         self.sig_set_project_path.connect(self.worker.do_set_project_path, Qt.QueuedConnection)
+        self.sig_translate_batch.connect(self.worker.do_translate_batch, Qt.QueuedConnection)
 
         # Señales desde la vista
         self._connect_view_signals()
@@ -94,6 +96,7 @@ class TranslatorAppController(QObject):
         self.view.undo_requested.connect(self._handle_undo_action)
         self.view.show_history_requested.connect(self._handle_show_history)
         self.view.navigation_selected.connect(self._handle_navigation_selection)
+        self.view.translate_batch_requested.connect(self._handle_translate_batch_request)
 
     # ================= Utilidades =================
 
@@ -146,6 +149,18 @@ class TranslatorAppController(QObject):
             'platform': platform
         }
         self.sig_translate_and_add.emit(payload)
+
+    def _handle_translate_batch_request(self, content, platform, base_lang):
+        self.view.set_ui_enabled(False)
+        self.view.update_progress_bar(0)
+        self.view.set_progress_bar_format("Traduciendo lote: %p%")
+
+        payload = {
+            'content': content,
+            'platform': platform,
+            'base_lang': base_lang
+        }
+        self.sig_translate_batch.emit(payload)
 
     def _handle_create_assets(self, platform):
         self.view.set_ui_enabled(False)
