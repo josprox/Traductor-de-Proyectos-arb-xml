@@ -1,5 +1,7 @@
 translation_history.json
 translation_log.xlsx
+translation_config.json
+.joss-red-backup/
 */__pycache__/
 /__pycache__/
 /build/

@@ -13,8 +13,15 @@ from openpyxl.utils import get_column_letter
 from lxml import etree
 import concurrent.futures
 import urllib.parse
+import tempfile
+import shutil
+from model.providers import TranslationProviderManager
 
-PLACEHOLDER_REGEX = re.compile(r'(%[0-9]+\$[0-9]*\.?[0-9]*[dsfpxXgGeE@]|%[0-9]*\.?[0-9]*[dsfpxXgGeE@]|\{[a-zA-Z0-9_]+\})')
+PLACEHOLDER_REGEX = re.compile(
+    r'(</?xliff:g\b[^>]*>|\$\{[a-zA-Z_][a-zA-Z0-9_.]*\}|'
+    r'%[0-9]+\$[0-9]*\.?[0-9]*[a-zA-Z@]|%[0-9]*\.?[0-9]*[a-zA-Z@]|%%|'
+    r'\{[a-zA-Z_][a-zA-Z0-9_]*\})'
+)
 RESTORE_REGEX = re.compile(r'___\s*[pP][hH]\s*_\s*(\d+)\s*___')
 
 
@@ -56,6 +63,8 @@ class TranslationCore:
         self.project_path = project_path
         self.log_callback = log_callback if log_callback else print # Usa print si no se proporciona callback
         self.history = []
+        self._translation_cache = {}
+        self.provider_manager = TranslationProviderManager(project_path, self._log)
         self._load_history()
         self._initialize_log_file()
 
@@ -65,6 +74,17 @@ class TranslationCore:
         self._load_history()
         self._initialize_log_file()
         self._log(f"Ruta del proyecto actualizada a: {self.project_path}")
+
+    def get_provider_config(self):
+        return self.provider_manager.get_public_config()
+
+    def save_provider_config(self, new_config):
+        self.provider_manager.save_config(new_config)
+
+    def set_active_provider(self, provider_name):
+        self.provider_manager.set_active_provider(provider_name)
+        self._translation_cache.clear()
+        self._log(f"Motor de traducción cambiado a: {provider_name}.")
 
     def _log(self, message):
         """Envía un mensaje a la función de log configurada."""
@@ -333,6 +353,32 @@ class TranslationCore:
             
         return RESTORE_REGEX.sub(restore_match, text)
 
+    @staticmethod
+    def _placeholder_signature(text):
+        """Firma multiconjunto usada para impedir pérdida/duplicación de variables."""
+        return sorted(PLACEHOLDER_REGEX.findall(text or ""))
+
+    @staticmethod
+    def _unique(values):
+        return list(dict.fromkeys(values))
+
+    @staticmethod
+    def _atomic_write_text(path, content):
+        """Escribe fuera del destino y reemplaza el archivo en una sola operación."""
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, temporary_path = tempfile.mkstemp(prefix=".translation-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+            os.replace(temporary_path, path)
+        except Exception:
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+            raise
+
     def fetch_translations_from_api(self, base_lang, original_text, platform):
         """
         Realiza llamadas concurrentes a la API de Google Translate (gtx) para obtener traducciones.
@@ -344,6 +390,7 @@ class TranslationCore:
             target_langs = self.get_kotlin_target_languages_for_api()
         else:
             raise ValueError("Plataforma no reconocida para la traducción.")
+        target_langs = self._unique(target_langs)
 
         translations = {}
         
@@ -363,6 +410,11 @@ class TranslationCore:
 
         # Función auxiliar para traducir un solo idioma
         def translate_single(target_code):
+            if target_code == base_lang:
+                return target_code, original_text
+            cache_key = (base_lang, target_code, original_text)
+            if cache_key in self._translation_cache:
+                return target_code, self._translation_cache[cache_key]
             google_target = LANGUAGE_MAP.get(target_code, target_code)
             
             # Casos especiales de mapeo (según el controlador original)
@@ -370,30 +422,41 @@ class TranslationCore:
             if target_code == 'nb-rNO': google_target = 'no'
             # Otros mapeos regionales suelen simplificarse por Google, pero enviamos el base si es simple
             
-            try:
-                params = {
-                    'client': 'gtx',
-                    'sl': base_lang,
-                    'tl': google_target,
-                    'dt': 't',
-                    'q': protected_text
-                }
-                
-                # Usar requests directamente
-                response = requests.get(self.GOOGLE_TRANSLATE_URL, params=params, timeout=10)
-                response.raise_for_status()
-                
-                # La respuesta es un array anidado: [[[ "Texto Traducido", "Texto Orig", ...], ...], ...]
-                data = response.json()
-                if data and len(data) > 0 and len(data[0]) > 0 and len(data[0][0]) > 0:
-                    translated = data[0][0][0]
-                    restored = self.restore_placeholders(translated, placeholders)
-                    return target_code, restored
-                else:
-                    return target_code, None
-            except Exception as e:
-                self._log(f"⚠️ Error traduciendo a {target_code}: {e}")
-                return target_code, None
+            last_error = None
+            attempt_count = 1 if hasattr(self, "provider_manager") else 3
+            for attempt in range(attempt_count):
+                try:
+                    params = {
+                        'client': 'gtx',
+                        'sl': base_lang,
+                        'tl': google_target,
+                        'dt': 't',
+                        'q': protected_text
+                    }
+
+                    if hasattr(self, "provider_manager"):
+                        translated = self.provider_manager.translate_single_with_failover(
+                            base_lang, google_target, protected_text
+                        )
+                    else:
+                        response = requests.get(self.GOOGLE_TRANSLATE_URL, params=params, timeout=15)
+                        response.raise_for_status()
+                        data = response.json()
+                        translated = "".join(
+                            segment[0] for segment in (data[0] if data and data[0] else [])
+                            if isinstance(segment, list) and segment and isinstance(segment[0], str)
+                        )
+                    if translated:
+                        restored = self.restore_placeholders(translated, placeholders)
+                        if self._placeholder_signature(restored) != self._placeholder_signature(original_text):
+                            raise ValueError("la respuesta alteró los placeholders")
+                        self._translation_cache[cache_key] = restored
+                        return target_code, restored
+                    raise ValueError("respuesta vacía del traductor")
+                except Exception as e:
+                    last_error = e
+            self._log(f"⚠️ No se pudo traducir a {target_code}: {last_error}")
+            return target_code, None
 
         # Ejecución paralela
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -402,15 +465,100 @@ class TranslationCore:
                 lang_code = future_to_lang[future]
                 try:
                     code, text = future.result()
-                    if text:
+                    if text is not None:
                         translations[code] = text
-                    else:
-                        translations[code] = original_text # Fallback al original si falla
                 except Exception as exc:
                     self._log(f"Completado con excepción para {lang_code}: {exc}")
-                    translations[lang_code] = original_text
 
         return translations
+
+    def translate_batch_optimized(self, base_lang, key_values, platform, progress_callback=None):
+        """Deduplica textos y traduce varias claves en paralelo sin mezclar formatos."""
+        if platform not in ("flutter", "kotlin"):
+            raise ValueError(f"Plataforma no reconocida: {platform!r}")
+        progress_callback = progress_callback or (lambda _value: None)
+        text_to_keys = {}
+        for key, text in key_values.items():
+            if not isinstance(text, str) or not text.strip():
+                continue
+            text_to_keys.setdefault(text, []).append(key)
+        self._log(
+            f"⚡ Deduplicación: {len(key_values)} claves consolidadas en "
+            f"{len(text_to_keys)} textos únicos."
+        )
+        targets = (
+            self.get_flutter_target_languages()
+            if platform == "flutter"
+            else self.get_kotlin_target_languages_for_api()
+        )
+        batch = {lang: {} for lang in self._unique(targets)}
+        if not text_to_keys:
+            return batch
+        completed = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(text_to_keys))) as executor:
+            futures = {
+                executor.submit(self.fetch_translations_from_api, base_lang, text, platform): text
+                for text in text_to_keys
+            }
+            for future in concurrent.futures.as_completed(futures):
+                source_text = futures[future]
+                translations = future.result()
+                for lang, translated in translations.items():
+                    for key in text_to_keys[source_text]:
+                        batch.setdefault(lang, {})[key] = translated
+                completed += 1
+                progress_callback(int(completed / len(futures) * 90))
+        return batch
+
+    def translate_missing_for_target(self, base_lang, target_lang, key_values,
+                                     progress_callback=None):
+        """Traduce solamente las claves ausentes de un idioma concreto.
+
+        El corrector usa esta ruta para no multiplicar cada texto por todos los
+        idiomas configurados cuando la mayoría de las traducciones ya existen.
+        """
+        progress_callback = progress_callback or (lambda _value: None)
+        if base_lang == target_lang:
+            return dict(key_values)
+        text_to_keys = {}
+        for key, value in key_values.items():
+            if isinstance(value, str) and value.strip():
+                text_to_keys.setdefault(value, []).append(key)
+        if not text_to_keys:
+            return {}
+
+        translated_by_key = {}
+
+        def translate_text(source_text):
+            cache_key = (base_lang, target_lang, source_text)
+            if cache_key in self._translation_cache:
+                return self._translation_cache[cache_key]
+            protected, placeholders = self.protect_placeholders(source_text)
+            translated = self.provider_manager.translate_single_with_failover(
+                base_lang, target_lang, protected
+            )
+            if not translated:
+                return None
+            restored = self.restore_placeholders(translated, placeholders)
+            if self._placeholder_signature(restored) != self._placeholder_signature(source_text):
+                self._log(f"⚠️ Traducción omitida para {target_lang}: placeholders alterados.")
+                return None
+            self._translation_cache[cache_key] = restored
+            return restored
+
+        completed = 0
+        # Pocas tareas simultáneas evitan activar el bloqueo 429 de los motores públicos.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(text_to_keys))) as executor:
+            futures = {executor.submit(translate_text, text): text for text in text_to_keys}
+            for future in concurrent.futures.as_completed(futures):
+                source_text = futures[future]
+                translated = future.result()
+                if translated:
+                    for key in text_to_keys[source_text]:
+                        translated_by_key[key] = translated
+                completed += 1
+                progress_callback(int(completed / len(futures) * 100))
+        return translated_by_key
 
     def add_translation_entry(self, base_lang, original_text, key, desc, translations, existing_key_files, platform):
         """
@@ -885,6 +1033,9 @@ class TranslationCore:
                         arb_data = json.load(f)
 
                     for key, text in lang_translations.items():
+                        # El modo lote completa faltantes; no destruye una traducción válida.
+                        if key in arb_data and isinstance(arb_data[key], str) and arb_data[key].strip():
+                            continue
                         # Guardar estado anterior para deshacer
                         undo_data['affected_files'][asset_name][key] = {
                             'old_value': arb_data.get(key),
@@ -894,10 +1045,14 @@ class TranslationCore:
                         arb_data[key] = text
                         desc = descriptions.get(key)
                         if desc:
-                            arb_data[f"@{key}"] = {"description": desc}
+                            metadata = arb_data.setdefault(f"@{key}", {})
+                            if isinstance(metadata, dict):
+                                metadata.setdefault("description", desc)
 
-                    with open(current_path, "w", encoding="utf-8") as f:
-                        json.dump(arb_data, f, indent=2, ensure_ascii=False)
+                    self._atomic_write_text(
+                        current_path,
+                        json.dumps(arb_data, indent=2, ensure_ascii=False) + "\n",
+                    )
                     self._log(f"✅ Lote de traducciones añadido en {asset_name} (Flutter)")
 
                 elif platform == "kotlin":
@@ -910,6 +1065,8 @@ class TranslationCore:
                         
                         # Guardar estado anterior para deshacer
                         if existing_string_element:
+                            if "".join(existing_string_element[0].itertext()).strip():
+                                continue
                             undo_data['affected_files'][asset_name][key] = {
                                 'old_value': existing_string_element[0].text,
                                 'old_desc': None
@@ -933,8 +1090,7 @@ class TranslationCore:
                     if not formatted_xml.endswith("\n"):
                         formatted_xml += "\n"
 
-                    with open(current_path, "w", encoding="utf-8") as f:
-                        f.write(formatted_xml)
+                    self._atomic_write_text(current_path, formatted_xml)
                     self._log(f"✅ Lote de traducciones añadido en {asset_name}/{self.KOTLIN_STRINGS_FILE_NAME} (Kotlin)")
 
             except Exception as e:
@@ -946,6 +1102,254 @@ class TranslationCore:
         self.add_to_history('batch_add_keys', undo_data, platform)
         return undo_data
 
+    def fix_and_format_project_files(self, platform, sync_missing=True, cleanup_unexpected=True,
+                                     progress_callback=None):
+        """Diagnostica y corrige únicamente los assets configurados del formato indicado.
+
+        Nunca usa detección automática ni recorre assets del formato contrario. Conserva
+        valores existentes; la traducción se usa solamente para claves ausentes.
+        """
+        if platform not in ("flutter", "kotlin"):
+            raise ValueError("La corrección requiere elegir Flutter (ARB) o Kotlin (XML).")
+        progress_callback = progress_callback or (lambda _value: None)
+        result = {
+            "files_fixed": 0,
+            "keys_fixed": 0,
+            "metadata_added": 0,
+            "placeholders_added": 0,
+            "missing_synced": 0,
+            "unexpected_archived": 0,
+            "backup_dir": None,
+            "details": [],
+        }
+        if platform == "flutter":
+            if cleanup_unexpected:
+                self._archive_unexpected_flutter_files(result)
+            self._fix_flutter_files(sync_missing, progress_callback, result)
+        else:
+            self._fix_kotlin_files(sync_missing, progress_callback, result)
+        return result
+
+    def _archive_unexpected_flutter_files(self, result):
+        """Aparta ARB con patrón administrado que no pertenecen a la lista Flutter.
+
+        Se usa una cuarentena recuperable y nunca se inspeccionan ni modifican XML.
+        """
+        allowed = {name.casefold() for name in self.FLUTTER_LANGUAGE_FILES}
+        unexpected = []
+        try:
+            entries = os.scandir(self.project_path)
+        except OSError as exc:
+            raise ValueError(f"No se pudo examinar la carpeta del proyecto: {exc}") from exc
+        with entries:
+            for entry in entries:
+                name = entry.name
+                if (
+                    entry.is_file()
+                    and re.fullmatch(r"intl_[^.\\/]+\.arb", name, flags=re.IGNORECASE)
+                    and name.casefold() not in allowed
+                ):
+                    unexpected.append(entry.path)
+        if not unexpected:
+            return
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup_dir = os.path.join(
+            self.project_path, ".joss-red-backup", "unexpected-arb", timestamp
+        )
+        os.makedirs(backup_dir, exist_ok=True)
+        for source in unexpected:
+            destination = os.path.join(backup_dir, os.path.basename(source))
+            shutil.move(source, destination)
+            result["unexpected_archived"] += 1
+            result["files_fixed"] += 1
+            result["details"].append({
+                "file": os.path.basename(source),
+                "platform": "Flutter (ARB)",
+                "changes": [f"Archivo ARB no configurado movido al respaldo: {destination}"],
+            })
+            self._log(f"📦 ARB no configurado respaldado: {source} -> {destination}")
+        result["backup_dir"] = backup_dir
+
+    def _fix_flutter_files(self, sync_missing, progress_callback, result):
+        loaded = {}
+        for file_name in self.FLUTTER_LANGUAGE_FILES:
+            path = os.path.join(self.project_path, file_name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    loaded[file_name] = json.load(handle)
+            except (OSError, json.JSONDecodeError) as exc:
+                self._log(f"⚠️ ARB inválido omitido '{path}': {exc}")
+        if not loaded:
+            raise ValueError("No se encontraron archivos ARB configurados para corregir.")
+
+        source_records = {}
+        source_descriptions = {}
+        ordered_sources = sorted(
+            loaded.items(),
+            key=lambda item: 0 if item[1].get("@@locale") == "en" else 1,
+        )
+        for file_name, data in ordered_sources:
+            source_locale = data.get("@@locale") or file_name.split("_")[1].split(".")[0]
+            for key, value in data.items():
+                if key.startswith("@") or not isinstance(value, str) or not value:
+                    continue
+                source_records.setdefault(key, (source_locale, value))
+                meta = data.get(f"@{key}")
+                if isinstance(meta, dict):
+                    source_descriptions.setdefault(key, meta.get("description", ""))
+
+        translations = {}
+        if sync_missing and source_records:
+            missing_jobs = []
+            for file_name, data in loaded.items():
+                target_locale = data.get("@@locale") or file_name.split("_")[1].split(".")[0]
+                by_source_locale = {}
+                for key, (source_locale, source_text) in source_records.items():
+                    if key not in data or not str(data.get(key, "")).strip():
+                        by_source_locale.setdefault(source_locale, {})[key] = source_text
+                for source_locale, values in by_source_locale.items():
+                    if source_locale != target_locale:
+                        missing_jobs.append((source_locale, target_locale, values))
+
+            total_jobs = len(missing_jobs)
+            for job_index, (source_locale, target_locale, values) in enumerate(missing_jobs, 1):
+                translations.setdefault(source_locale, {})[target_locale] = (
+                    self.translate_missing_for_target(source_locale, target_locale, values)
+                )
+                if total_jobs:
+                    progress_callback(int(job_index / total_jobs * 60))
+
+        total = len(loaded)
+        for index, (file_name, data) in enumerate(loaded.items(), 1):
+            locale = file_name.split("_")[1].split(".")[0]
+            changes = []
+            if data.get("@@locale") != locale:
+                data["@@locale"] = locale
+                changes.append(f"@@locale establecido en '{locale}'")
+
+            for key, (source_locale, source_text) in source_records.items():
+                if sync_missing and (key not in data or not str(data.get(key, "")).strip()):
+                    translated = (
+                        source_text if locale == source_locale
+                        else translations.get(source_locale, {}).get(locale, {}).get(key)
+                    )
+                    if translated:
+                        data[key] = translated
+                        result["missing_synced"] += 1
+                        result["keys_fixed"] += 1
+                        changes.append(f"Traducción faltante añadida: {key}")
+
+                if key not in data:
+                    continue
+                meta_key = f"@{key}"
+                meta = data.get(meta_key)
+                if not isinstance(meta, dict):
+                    meta = {}
+                    data[meta_key] = meta
+                    result["metadata_added"] += 1
+                    changes.append(f"Metadato añadido: {meta_key}")
+                if source_descriptions.get(key) and not meta.get("description"):
+                    meta["description"] = source_descriptions[key]
+                variables = [token[1:-1] for token in re.findall(r"\{[A-Za-z_][A-Za-z0-9_]*\}", data[key])]
+                if variables:
+                    placeholders = meta.setdefault("placeholders", {})
+                    missing_vars = [name for name in variables if name not in placeholders]
+                    for name in missing_vars:
+                        placeholders[name] = {}
+                    if missing_vars:
+                        result["placeholders_added"] += len(missing_vars)
+                        changes.append(f"Placeholders añadidos en {meta_key}: {', '.join(missing_vars)}")
+
+            ordered = {"@@locale": data.get("@@locale", locale)}
+            for key in sorted(k for k in data if not k.startswith("@")):
+                ordered[key] = data[key]
+                if f"@{key}" in data:
+                    ordered[f"@{key}"] = data[f"@{key}"]
+            for key, value in data.items():
+                if key not in ordered:
+                    ordered[key] = value
+            if changes:
+                content = json.dumps(ordered, indent=2, ensure_ascii=False) + "\n"
+                self._atomic_write_text(os.path.join(self.project_path, file_name), content)
+                result["files_fixed"] += 1
+                result["details"].append({"file": file_name, "platform": "Flutter (ARB)", "changes": changes})
+            progress_callback(60 + int(index / total * 40))
+
+    def _fix_kotlin_files(self, sync_missing, progress_callback, result):
+        loaded = {}
+        parser = etree.XMLParser(remove_blank_text=True, remove_comments=False)
+        for folder in self.KOTLIN_LANGUAGE_FOLDERS:
+            path = os.path.join(self.project_path, folder, self.KOTLIN_STRINGS_FILE_NAME)
+            if not os.path.isfile(path):
+                continue
+            try:
+                tree = etree.parse(path, parser)
+                if tree.getroot().tag != "resources":
+                    raise ValueError("la raíz no es <resources>")
+                loaded[folder] = tree
+            except (OSError, ValueError, etree.XMLSyntaxError) as exc:
+                self._log(f"⚠️ XML inválido omitido '{path}': {exc}")
+        if not loaded:
+            raise ValueError("No se encontraron archivos XML configurados para corregir.")
+
+        source_records = {}
+        ordered_sources = sorted(loaded.items(), key=lambda item: 0 if item[0] == "values" else 1)
+        for folder, tree in ordered_sources:
+            source_locale = "en" if folder == "values" else folder.replace("values-", "").split("-r")[0]
+            for element in tree.getroot().xpath("string[@name]"):
+                if element.get("translatable") == "false":
+                    continue
+                value = "".join(element.itertext())
+                if value:
+                    source_records.setdefault(element.get("name"), (source_locale, value))
+        translations = {}
+        if sync_missing and source_records:
+            by_source_locale = {}
+            for key, (source_locale, value) in source_records.items():
+                by_source_locale.setdefault(source_locale, {})[key] = value
+            for source_locale, values in by_source_locale.items():
+                translations[source_locale] = self.translate_batch_optimized(
+                    source_locale, values, "kotlin", lambda value: progress_callback(int(value * .6))
+                )
+
+        total = len(loaded)
+        for index, (folder, tree) in enumerate(loaded.items(), 1):
+            root = tree.getroot()
+            locale = "en" if folder == "values" else folder.replace("values-", "")
+            api_locale = locale.split("-r")[0]
+            existing = {element.get("name"): element for element in root.xpath("string[@name]")}
+            changes = []
+            if sync_missing:
+                for key, (source_locale, source_text) in source_records.items():
+                    if key in existing and "".join(existing[key].itertext()).strip():
+                        continue
+                    translated = (
+                        source_text if api_locale == source_locale
+                        else translations.get(source_locale, {}).get(api_locale, {}).get(key)
+                    )
+                    if not translated:
+                        continue
+                    if key in existing:
+                        existing[key].text = translated
+                    else:
+                        root.append(etree.Element("string", name=key))
+                        root[-1].text = translated
+                    result["missing_synced"] += 1
+                    result["keys_fixed"] += 1
+                    changes.append(f"String faltante añadido: {key}")
+            if changes:
+                content = etree.tostring(
+                    root, encoding="utf-8", xml_declaration=True, pretty_print=True
+                ).decode("utf-8")
+                if not content.endswith("\n"):
+                    content += "\n"
+                path = os.path.join(self.project_path, folder, self.KOTLIN_STRINGS_FILE_NAME)
+                self._atomic_write_text(path, content)
+                result["files_fixed"] += 1
+                result["details"].append({"file": os.path.join(folder, self.KOTLIN_STRINGS_FILE_NAME), "platform": "Kotlin (XML)", "changes": changes})
+            progress_callback(60 + int(index / total * 40))
     def undo_batch_add_keys_action(self, payload, platform):
         """
         Deshace un lote completo de traducciones.

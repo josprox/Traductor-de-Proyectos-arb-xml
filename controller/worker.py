@@ -1,7 +1,9 @@
 # controller/worker.py
 import os
+import time
 from PySide6.QtCore import QObject, Signal, Slot
 from model.translation_model import TranslationCore
+from model.providers import OpenAICompatibleProvider
 
 class TranslationWorker(QObject):
     """
@@ -15,6 +17,8 @@ class TranslationWorker(QObject):
     error_occurred = Signal(str)
     command_output = Signal(str)
     history_ready = Signal(list)
+    provider_config_ready = Signal(dict)
+    ai_test_result = Signal(dict)
 
     def __init__(self, project_path: str):
         super().__init__()
@@ -27,6 +31,7 @@ class TranslationWorker(QObject):
         try:
             self.core = TranslationCore(self.project_path, log_callback=self._thread_safe_log)
             self._thread_safe_log(f"✅ Core inicializado en: {os.path.abspath(self.project_path)}")
+            self.provider_config_ready.emit(self.core.get_provider_config())
         except Exception as e:
             self.error_occurred.emit(f"❌ Error inicializando Core: {e}")
 
@@ -38,20 +43,68 @@ class TranslationWorker(QObject):
 
     # ============ Slots de trabajo ============
 
+    @Slot(str)
+    def do_set_provider(self, provider_name):
+        try:
+            self.core.set_active_provider(provider_name)
+            self.provider_config_ready.emit(self.core.get_provider_config())
+        except Exception as e:
+            self.error_occurred.emit(f"❌ Error al cambiar de proveedor: {e}")
+
+    @Slot(dict)
+    def do_save_provider_config(self, config):
+        try:
+            self.core.save_provider_config(config)
+            self.provider_config_ready.emit(self.core.get_provider_config())
+            self._thread_safe_log("✅ Configuración de traductores guardada.")
+        except Exception as e:
+            self.error_occurred.emit(f"❌ Error al guardar configuración de traductores: {e}")
+
+    @Slot(dict)
+    def do_test_ai_connection(self, data):
+        try:
+            provider = OpenAICompatibleProvider(
+                base_url=data.get('base_url', ''), api_key=data.get('api_key', ''),
+                model=data.get('model', ''), log_callback=self._thread_safe_log,
+            )
+            started = time.time()
+            translated = provider.translate_single('en', 'es', 'Hello world')
+            elapsed = time.time() - started
+            if translated and translated != 'Hello world':
+                result = {"success": True, "message": f"✅ Conexión correcta ({elapsed:.2f}s): {translated}"}
+            else:
+                result = {"success": False, "message": "El endpoint respondió sin una traducción válida. Revisa el modelo."}
+            self.ai_test_result.emit(result)
+        except Exception as e:
+            self.ai_test_result.emit({"success": False, "message": f"❌ Error de conexión: {e}"})
+
     @Slot(dict)
     def do_translate_and_add(self, data):
         try:
             self.log_message.emit(f"Iniciando traducción para '{data['key']}' en {data['platform'].upper()}...")
             self.progress_updated.emit(0)
 
-            translations = self.core.fetch_translations_from_api(
-                data['base_lang'], data['original_text'], data['platform']
+            platform = data['platform']
+            if platform not in ('flutter', 'kotlin'):
+                raise ValueError(f"Plataforma no reconocida: {platform!r}")
+            existing_key_files = self.core.check_key_existence(data['key'], platform)
+            target_count = (
+                len(self.core.FLUTTER_LANGUAGE_FILES)
+                if platform == 'flutter'
+                else len(self.core.KOTLIN_LANGUAGE_FOLDERS)
             )
+            translations = {}
+            if len(existing_key_files) < target_count:
+                translations = self.core.fetch_translations_from_api(
+                    data['base_lang'], data['original_text'], platform
+                )
+            else:
+                self.log_message.emit("ℹ️ La clave ya existe en todos los destinos; no se llamó al traductor.")
             self.progress_updated.emit(50)
 
             self.core.add_translation_entry(
                 data['base_lang'], data['original_text'], data['key'],
-                data['desc'], translations, data['existing_key_files'], data['platform']
+                data['desc'], translations, existing_key_files, platform
             )
             self.operation_finished.emit({'type': 'translate_and_add', 'platform': data['platform']})
         except Exception as e:
@@ -180,10 +233,18 @@ class TranslationWorker(QObject):
             # 1. Parsear el contenido
             detected_platform, detected_base, key_values, descriptions = self.core.parse_batch_content(data['content'])
             
-            # Determinar plataforma
-            platform = data['platform']
-            if platform == 'auto':
-                platform = detected_platform
+            # Resolver el formato una sola vez. Una selección manual que no
+            # coincide con el contenido es un error: continuar mezclaría el
+            # parser de un formato con los idiomas/escritor del otro.
+            requested_platform = data['platform']
+            platform = detected_platform if requested_platform == 'auto' else requested_platform
+            if platform not in ('flutter', 'kotlin'):
+                raise ValueError(f"Plataforma no reconocida: {platform!r}")
+            if requested_platform != 'auto' and platform != detected_platform:
+                raise ValueError(
+                    f"El contenido es {detected_platform.upper()}, pero se seleccionó "
+                    f"{platform.upper()}. Corrige la selección antes de continuar."
+                )
             
             # Determinar idioma base
             base_lang = data['base_lang']
@@ -198,33 +259,13 @@ class TranslationWorker(QObject):
             if not key_values:
                 raise ValueError("No se encontraron claves válidas para traducir en el contenido proporcionado.")
 
-            # 2. Traducir cada clave
-            total_keys = len(key_values)
-            batch_translations = {} # { lang: { key: value } }
-            
-            # Inicializar los diccionarios de traducciones por idioma
-            if platform == "flutter":
-                target_langs = self.core.get_flutter_target_languages()
-            else:
-                target_langs = self.core.get_kotlin_target_languages_for_api()
-
-            for lang in target_langs:
-                batch_translations[lang] = {}
-
-            # Traducir clave a clave e ir actualizando el progreso
-            for idx, (key, original_text) in enumerate(key_values.items()):
-                self.log_message.emit(f"Traduciendo [{idx + 1}/{total_keys}]: '{key}' -> '{original_text[:30]}...'")
-                
-                # Traduce esta clave a todos los idiomas de destino
-                key_translations = self.core.fetch_translations_from_api(base_lang, original_text, platform)
-                
-                # Guardar las traducciones en nuestra estructura por lote
-                for lang, translated_text in key_translations.items():
-                    batch_translations[lang][key] = translated_text
-                
-                # Actualizar el progreso (reservando el 90% para traducción, 10% para guardado final)
-                progress = int((idx + 1) / total_keys * 90)
-                self.progress_updated.emit(progress)
+            # 2. Deduplicar textos y traducirlos en paralelo.
+            batch_translations = self.core.translate_batch_optimized(
+                base_lang,
+                key_values,
+                platform,
+                progress_callback=lambda value: self.progress_updated.emit(value),
+            )
 
             # 3. Guardar en lote
             self.log_message.emit("Escribiendo traducciones en los archivos de idioma...")
@@ -235,6 +276,32 @@ class TranslationWorker(QObject):
 
         except Exception as e:
             self.error_occurred.emit(f"❌ Error en 'translate_batch': {e}")
+        finally:
+            self.progress_updated.emit(100)
+
+    @Slot(dict)
+    def do_fix_files(self, data):
+        """Corrige exclusivamente los archivos del formato seleccionado."""
+        try:
+            platform = data.get('platform')
+            if platform not in ('flutter', 'kotlin'):
+                raise ValueError("Selecciona explícitamente Flutter (ARB) o Kotlin (XML).")
+            sync_missing = bool(data.get('sync_missing', True))
+            cleanup_unexpected = bool(data.get('cleanup_unexpected', True))
+            self.progress_updated.emit(0)
+            result = self.core.fix_and_format_project_files(
+                platform=platform,
+                sync_missing=sync_missing,
+                cleanup_unexpected=cleanup_unexpected,
+                progress_callback=self.progress_updated.emit,
+            )
+            self.operation_finished.emit({
+                'type': 'fix_files',
+                'platform': platform,
+                **result,
+            })
+        except Exception as e:
+            self.error_occurred.emit(f"❌ Error en 'fix_files': {e}")
         finally:
             self.progress_updated.emit(100)
 

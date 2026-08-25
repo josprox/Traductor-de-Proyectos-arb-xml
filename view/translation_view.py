@@ -2,9 +2,12 @@ import os
 from PySide6.QtWidgets import (
     QMainWindow, QPushButton, QWidget, QVBoxLayout,
     QLabel, QLineEdit, QTextEdit, QInputDialog, QMessageBox, QProgressBar,
-    QHBoxLayout, QComboBox, QFileDialog, QDialog, QListWidget, QStackedWidget # QSplitter was not used, removed to simplify
+    QHBoxLayout, QComboBox, QFileDialog, QDialog, QListWidget, QStackedWidget,
+    QCheckBox, QTreeWidget, QTreeWidgetItem, QFrame, QGridLayout, QHeaderView,
+    QSizePolicy, QTabWidget, QGraphicsDropShadowEffect
 )
 from PySide6.QtCore import Qt, Signal, QObject
+from PySide6.QtGui import QFont
 from datetime import datetime # Necesario para mostrar el historial
 
 class TranslatorAppView(QMainWindow):
@@ -24,188 +27,328 @@ class TranslatorAppView(QMainWindow):
     show_history_requested = Signal()
     navigation_selected = Signal(str) # Nueva señal para la selección del menú de navegación
     translate_batch_requested = Signal(str, str, str) # content, platform, base_lang
+    fix_files_requested = Signal(dict)
+    provider_changed = Signal(str)
+    save_provider_config_requested = Signal(dict)
+    test_ai_connection_requested = Signal(dict)
 
     def __init__(self, initial_project_path):
         super().__init__()
-        self.setWindowTitle("Traductor ARB/Kotlin - Joss Red")
-        self.setMinimumSize(800, 600) # Aumentar el tamaño mínimo para el navbar
+        self.setWindowTitle("Sistema de Traducción Masiva y Linter ARB/XML - Joss Red")
+        self.setMinimumSize(1050, 700)
         self._current_platform = "flutter" # Estado inicial, se actualiza con el selector
+        self._provider_config = {
+            "active_provider": "google", "auto_failover": True,
+            "local_ai": {"base_url": "http://localhost:11434/v1", "api_key": "", "model": "llama3.2"},
+            "cloud_ai": {"base_url": "https://api.deepseek.com/v1", "api_key": "", "model": "deepseek-chat"},
+        }
 
         self.init_ui(initial_project_path)
         self._update_ui_for_platform(self._current_platform) # Asegurar estado inicial de la UI
 
     def init_ui(self, initial_project_path):
-        """
-        Inicializa los elementos de la interfaz de usuario y su diseño.
-        """
-        # Layout principal que contendrá el navbar y el panel de contenido
+        self.setStyleSheet(self._application_stylesheet())
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_horizontal_layout = QHBoxLayout(central_widget)
+        main_horizontal_layout.setContentsMargins(10, 10, 10, 10)
+        main_horizontal_layout.setSpacing(12)
 
-        # --- Navbar Lateral Izquierdo ---
+        nav_panel = QFrame()
+        nav_panel.setObjectName("navigationPanel")
+        nav_panel.setFixedWidth(220)
+        nav_layout = QVBoxLayout(nav_panel)
+        nav_layout.setContentsMargins(10, 14, 10, 12)
+        brand = QLabel("<span style='font-size:22px'>◆</span>  <b style='font-size:17px'>JOSS RED</b>")
+        brand.setObjectName("brand")
+        nav_layout.addWidget(brand)
+        subtitle = QLabel("LOCALIZATION STUDIO")
+        subtitle.setObjectName("brandSubtitle")
+        nav_layout.addWidget(subtitle)
+        nav_layout.addSpacing(14)
         self.navbar_list_widget = QListWidget()
-        self.navbar_list_widget.setMaximumWidth(150) # Ancho fijo para el navbar
-        self.navbar_list_widget.addItem("Traductor") # Índice 0
-        self.navbar_list_widget.addItem("Modo Lote ARB/XML") # Índice 1
-        
-        # --- Contenido Principal (Stacked Widget) ---
-        self.stacked_widget = QStackedWidget()
+        self.navbar_list_widget.setObjectName("navigation")
+        self.navbar_list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.navbar_list_widget.addItem("🌐  Traductor")
+        self.navbar_list_widget.addItem("📦  Modo Lote")
+        self.navbar_list_widget.addItem("🔧  Corregir Archivos")
+        nav_layout.addWidget(self.navbar_list_widget, 1)
+        self.provider_status_label = QLabel("●  Motor listo")
+        self.provider_status_label.setObjectName("providerStatus")
+        nav_layout.addWidget(self.provider_status_label)
+        version = QLabel("v2.0  •  ARB / XML")
+        version.setObjectName("brandSubtitle")
+        nav_layout.addWidget(version)
 
-        # Página del Traductor (contenido existente)
-        translator_page_widget = QWidget()
-        translator_layout = QVBoxLayout(translator_page_widget)
+        right_panel_widget = QWidget()
+        right_panel_layout = QVBoxLayout(right_panel_widget)
+        right_panel_layout.setContentsMargins(0, 0, 0, 0)
+        right_panel_layout.setSpacing(8)
 
-        # Selector de plataforma
-        platform_layout = QHBoxLayout()
-        platform_layout.addWidget(QLabel("Seleccionar Plataforma:"))
+        # Cabecera compartida, igual que en la versión instalada.
+        header_card = self._make_card()
+        header_grid = QGridLayout(header_card)
+        header_grid.setContentsMargins(14, 10, 14, 10)
+        header_grid.setSpacing(8)
+        header_grid.addWidget(QLabel("Motor:"), 0, 0)
+        self.provider_selector = QComboBox()
+        self.provider_selector.addItem("⚡  Google Translate (Multi-Tier)", "google")
+        self.provider_selector.addItem("🤖  IA Local (Ollama / LM Studio)", "local_ai")
+        self.provider_selector.addItem("☁️  IA Cloud (OpenAI / DeepSeek / Groq)", "cloud_ai")
+        self.provider_selector.addItem("🌍  MyMemory", "mymemory")
+        self.provider_selector.currentIndexChanged.connect(
+            lambda index: self.provider_changed.emit(self.provider_selector.itemData(index))
+        )
+        header_grid.addWidget(self.provider_selector, 0, 1)
+        self.config_ai_btn = QPushButton("⚙  Configurar Motores")
+        self.config_ai_btn.clicked.connect(self._open_ai_config_dialog)
+        header_grid.addWidget(self.config_ai_btn, 0, 2)
+        header_grid.addWidget(QLabel("Plataforma:"), 0, 3)
         self.platform_selector = QComboBox()
         self.platform_selector.addItem("Flutter (ARB)", "flutter")
         self.platform_selector.addItem("Kotlin (XML)", "kotlin")
         self.platform_selector.currentIndexChanged.connect(
             lambda index: self.platform_changed.emit(self.platform_selector.itemData(index))
         )
-        platform_layout.addWidget(self.platform_selector)
-        platform_layout.addStretch()
-        translator_layout.addLayout(platform_layout)
-
-        # Selector de carpeta de proyecto
-        project_path_layout = QHBoxLayout()
-        project_path_layout.addWidget(QLabel("Ruta del Proyecto:"))
+        header_grid.addWidget(self.platform_selector, 0, 4)
+        header_grid.addWidget(QLabel("Ruta:"), 1, 0)
         self.project_path_display = QLineEdit(initial_project_path)
         self.project_path_display.setReadOnly(True)
-        project_path_layout.addWidget(self.project_path_display)
-        self.select_folder_btn = QPushButton("Seleccionar Carpeta")
+        header_grid.addWidget(self.project_path_display, 1, 1, 1, 3)
+        self.select_folder_btn = QPushButton("📁  Seleccionar Carpeta")
         self.select_folder_btn.clicked.connect(self.select_folder_requested.emit)
-        project_path_layout.addWidget(self.select_folder_btn)
-        translator_layout.addLayout(project_path_layout)
+        header_grid.addWidget(self.select_folder_btn, 1, 4)
+        header_grid.setColumnStretch(1, 1)
+        right_panel_layout.addWidget(header_card)
 
-        # Campos de entrada
-        input_grid_layout = QVBoxLayout()
-        input_grid_layout.addWidget(QLabel("Idioma base"))
+        self.stacked_widget = QStackedWidget()
+
+        # Traductor
+        translator_page_widget = QWidget()
+        translator_layout = QVBoxLayout(translator_page_widget)
+        translator_layout.setContentsMargins(0, 0, 0, 0)
+        translator_layout.setSpacing(8)
+        form_card = self._make_card()
+        form_layout = QGridLayout(form_card)
+        form_layout.setContentsMargins(14, 12, 14, 12)
+        form_layout.setSpacing(7)
+        form_layout.addWidget(QLabel("Idioma base (ej. 'es', 'en'):"), 0, 0)
+        form_layout.addWidget(QLabel("Nombre de la etiqueta / String:"), 0, 1)
         self.base_lang_input = QLineEdit()
-        self.base_lang_input.setPlaceholderText("Idioma base (ej. 'es', 'en')")
-        input_grid_layout.addWidget(self.base_lang_input)
-
-        input_grid_layout.addWidget(QLabel("Texto original"))
-        self.text_input = QLineEdit()
-        self.text_input.setPlaceholderText("Texto original")
-        input_grid_layout.addWidget(self.text_input)
-
-        input_grid_layout.addWidget(QLabel("Nombre de la etiqueta / String"))
+        self.base_lang_input.setPlaceholderText("ej. 'es', 'en'")
+        form_layout.addWidget(self.base_lang_input, 1, 0)
         self.key_input = QLineEdit()
-        self.key_input.setPlaceholderText("Nombre de la etiqueta (Flutter) / Nombre del string (Kotlin)")
-        input_grid_layout.addWidget(self.key_input)
-
+        form_layout.addWidget(self.key_input, 1, 1)
+        form_layout.addWidget(QLabel("Texto original a traducir:"), 2, 0, 1, 2)
+        self.text_input = QLineEdit()
+        self.text_input.setPlaceholderText("Texto original con o sin variables (ej. 'Hola {name}, bienvenido')")
+        form_layout.addWidget(self.text_input, 3, 0, 1, 2)
         self.desc_label = QLabel("Descripción (Flutter - opcional)")
-        input_grid_layout.addWidget(self.desc_label)
+        form_layout.addWidget(self.desc_label, 4, 0, 1, 2)
         self.desc_input = QLineEdit()
-        self.desc_input.setPlaceholderText("Descripción (opcional)")
-        input_grid_layout.addWidget(self.desc_input)
+        self.desc_input.setPlaceholderText("Contexto o descripción para traductores (opcional)")
+        form_layout.addWidget(self.desc_input, 5, 0, 1, 2)
+        form_layout.setColumnStretch(0, 1)
+        form_layout.setColumnStretch(1, 2)
+        translator_layout.addWidget(form_card)
 
-        translator_layout.addLayout(input_grid_layout)
-
-        # Botones de acción
-        button_layout = QHBoxLayout()
-        self.translate_button = QPushButton("Traducir y Agregar")
+        self.translate_button = QPushButton("🚀  Traducir y Agregar a Todos los Idiomas")
+        self.translate_button.setObjectName("primaryButton")
+        self.translate_button.setMinimumHeight(44)
         self.translate_button.clicked.connect(self._emit_translate_request)
-        button_layout.addWidget(self.translate_button)
+        translator_layout.addWidget(self.translate_button)
 
-        self.create_files_btn = QPushButton("Crear Archivos/Carpetas de Idioma")
+        actions_card = self._make_card()
+        actions_grid = QGridLayout(actions_card)
+        actions_grid.setContentsMargins(10, 8, 10, 8)
+        actions_grid.setSpacing(7)
+        self.create_files_btn = QPushButton("📁  Crear Archivos")
         self.create_files_btn.clicked.connect(lambda: self.create_assets_requested.emit(self._current_platform))
-        button_layout.addWidget(self.create_files_btn)
-
-        self.delete_files_btn = QPushButton("Eliminar Archivos/Carpetas de Idioma")
-        self.delete_files_btn.clicked.connect(lambda: self._confirm_delete_assets())
-        button_layout.addWidget(self.delete_files_btn)
-
-        self.delete_key_btn = QPushButton("Eliminar Etiqueta/String")
+        self.delete_key_btn = QPushButton("🗑️  Eliminar Clave")
         self.delete_key_btn.clicked.connect(self._prompt_delete_key)
-        button_layout.addWidget(self.delete_key_btn)
-        translator_layout.addLayout(button_layout)
-        
-        # Botón específico de Flutter Intl Generate
-        intl_generate_layout = QHBoxLayout()
-        self.flutter_intl_generate_btn = QPushButton("Actualizar Intl de Flutter")
+        self.flutter_intl_generate_btn = QPushButton("⚡  Intl Generate")
         self.flutter_intl_generate_btn.clicked.connect(self.flutter_intl_generate_requested.emit)
-        intl_generate_layout.addWidget(self.flutter_intl_generate_btn)
-        intl_generate_layout.addStretch()
-        translator_layout.addLayout(intl_generate_layout)
-
-        # Botones de Historial y Deshacer
-        history_undo_layout = QHBoxLayout()
-        self.history_btn = QPushButton("Ver Historial")
+        self.history_btn = QPushButton("📋  Ver Historial")
         self.history_btn.clicked.connect(self.show_history_requested.emit)
-        history_undo_layout.addWidget(self.history_btn)
-
-        self.undo_btn = QPushButton("Deshacer Último Cambio")
+        self.undo_btn = QPushButton("↶  Deshacer")
         self.undo_btn.clicked.connect(self._confirm_undo_action)
-        history_undo_layout.addWidget(self.undo_btn)
-        translator_layout.addLayout(history_undo_layout)
+        self.delete_files_btn = QPushButton("⚠️  Eliminar Todo")
+        self.delete_files_btn.clicked.connect(self._confirm_delete_assets)
+        for index, button in enumerate((self.create_files_btn, self.delete_key_btn,
+                                        self.flutter_intl_generate_btn, self.history_btn,
+                                        self.undo_btn, self.delete_files_btn)):
+            actions_grid.addWidget(button, index // 3, index % 3)
+        translator_layout.addWidget(actions_card)
+        translator_layout.addStretch()
+        self.stacked_widget.addWidget(translator_page_widget)
 
-        # Añadir la página del traductor al stacked widget
-        self.stacked_widget.addWidget(translator_page_widget) # Índice 0 para el traductor
-
-        # --- Página de Traducción por Lote (Nueva) ---
+        # Modo lote
         batch_translator_page_widget = QWidget()
         batch_layout = QVBoxLayout(batch_translator_page_widget)
-
-        batch_layout.addWidget(QLabel("Modo Lote (Pega contenido ARB JSON o Android XML):"))
+        batch_layout.setContentsMargins(0, 0, 0, 0)
+        batch_layout.setSpacing(8)
+        batch_banner = QLabel(
+            "<b>Pega contenido ARB (JSON) o Android (strings.xml).</b> "
+            "El sistema deduplica y traduce en paralelo a todos los idiomas configurados."
+        )
+        batch_banner.setObjectName("banner")
+        batch_banner.setWordWrap(True)
+        batch_layout.addWidget(batch_banner)
         self.batch_text_input = QTextEdit()
-        self.batch_text_input.setPlaceholderText("Pega aquí tu contenido completo de ARB JSON o strings.xml de Android...\n\nEjemplo ARB:\n{\n  \"@@locale\": \"en\",\n  \"aiWizardTitle\": \"🚀 Joss AI Activation Wizard 🚀\"\n}\n\nEjemplo XML:\n<resources>\n  <string name=\"aiWizardTitle\">🚀 Joss AI Activation Wizard 🚀</string>\n</resources>")
-        batch_layout.addWidget(self.batch_text_input)
-
-        batch_platform_layout = QHBoxLayout()
-        batch_platform_layout.addWidget(QLabel("Plataforma:"))
+        self.batch_text_input.setFont(QFont("Consolas", 10))
+        self.batch_text_input.setPlaceholderText("Pega tu código ARB o XML aquí...")
+        batch_layout.addWidget(self.batch_text_input, 1)
         self.batch_platform_selector = QComboBox()
-        self.batch_platform_selector.addItem("Detectar Automáticamente", "auto")
         self.batch_platform_selector.addItem("Flutter (ARB)", "flutter")
         self.batch_platform_selector.addItem("Kotlin/Android (XML)", "kotlin")
-        batch_platform_layout.addWidget(self.batch_platform_selector)
-
-        batch_platform_layout.addWidget(QLabel("Idioma base:"))
+        self.batch_platform_selector.hide()
+        batch_footer = QHBoxLayout()
+        batch_footer.addWidget(QLabel("Idioma base:"))
         self.batch_base_lang_input = QLineEdit()
         self.batch_base_lang_input.setPlaceholderText("Autodetectar o ej. 'en', 'es'")
-        self.batch_base_lang_input.setMaximumWidth(160)
-        batch_platform_layout.addWidget(self.batch_base_lang_input)
-        batch_platform_layout.addStretch()
-        batch_layout.addLayout(batch_platform_layout)
-
-        self.batch_translate_btn = QPushButton("Procesar y Traducir Lote")
+        self.batch_base_lang_input.setMaximumWidth(190)
+        batch_footer.addWidget(self.batch_base_lang_input)
+        self.batch_translate_btn = QPushButton("🚀  Procesar y Traducir Lote Masivo")
+        self.batch_translate_btn.setObjectName("primaryButton")
+        self.batch_translate_btn.setMinimumHeight(42)
         self.batch_translate_btn.clicked.connect(self._emit_translate_batch_request)
-        batch_layout.addWidget(self.batch_translate_btn)
+        batch_footer.addWidget(self.batch_translate_btn, 1)
+        batch_layout.addLayout(batch_footer)
+        self.stacked_widget.addWidget(batch_translator_page_widget)
 
-        self.stacked_widget.addWidget(batch_translator_page_widget) # Índice 1 para el traductor de lote
+        # Corregir archivos
+        fix_page_widget = QWidget()
+        fix_layout = QVBoxLayout(fix_page_widget)
+        fix_layout.setContentsMargins(0, 0, 0, 0)
+        fix_layout.setSpacing(8)
+        fix_desc = QLabel(
+            "<b>Diagnóstico, Formateo, Linter y Sincronización Automática:</b><br>"
+            "&nbsp;&nbsp;• <b>Traducciones faltantes:</b> completa claves sin sobrescribir valores válidos.<br>"
+            "&nbsp;&nbsp;• <b>Missing Metadata:</b> genera metadatos <span style='color:#38bdf8'>@clave</span> faltantes.<br>"
+            "&nbsp;&nbsp;• <b>Placeholders:</b> conserva variables y genera sus bloques ARB.<br>"
+            "&nbsp;&nbsp;• <b>Aislamiento:</b> procesa exclusivamente el formato seleccionado."
+        )
+        fix_desc.setObjectName("banner")
+        fix_desc.setWordWrap(True)
+        fix_layout.addWidget(fix_desc)
+        fix_controls = self._make_card()
+        fix_controls_layout = QHBoxLayout(fix_controls)
+        self.sync_missing_cb = QCheckBox("Sincronizar y traducir claves faltantes entre idiomas")
+        self.sync_missing_cb.setChecked(True)
+        fix_controls_layout.addWidget(self.sync_missing_cb, 1)
+        self.cleanup_unexpected_cb = QCheckBox("Respaldar ARB no configurados")
+        self.cleanup_unexpected_cb.setChecked(True)
+        self.cleanup_unexpected_cb.setToolTip(
+            "Mueve intl_*.arb ajenos a la lista Flutter a .joss-red-backup; no los elimina."
+        )
+        fix_controls_layout.addWidget(self.cleanup_unexpected_cb)
+        self.run_fix_btn = QPushButton("🚀  Ejecutar Corrección y Sincronización")
+        self.run_fix_btn.setObjectName("primaryButton")
+        self.run_fix_btn.clicked.connect(lambda: self.fix_files_requested.emit({
+            "platform": self._current_platform,
+            "sync_missing": self.sync_missing_cb.isChecked(),
+            "cleanup_unexpected": self.cleanup_unexpected_cb.isChecked(),
+        }))
+        fix_controls_layout.addWidget(self.run_fix_btn)
+        fix_layout.addWidget(fix_controls)
+        stats = QGridLayout()
+        self.stat_files_lbl = self._make_stat("📁 Archivos corregidos", "#60a5fa")
+        self.stat_synced_lbl = self._make_stat("🔄 Faltantes sincronizados", "#c084fc")
+        self.stat_meta_lbl = self._make_stat("🏷 Metadatos @key añadidos", "#4ade80")
+        self.stat_ph_lbl = self._make_stat("🧩 Placeholders generados", "#facc15")
+        self.stat_archived_lbl = self._make_stat("📦 ARB no configurados respaldados", "#fb923c")
+        stats.addWidget(self.stat_files_lbl, 0, 0)
+        stats.addWidget(self.stat_synced_lbl, 0, 1)
+        stats.addWidget(self.stat_meta_lbl, 1, 0)
+        stats.addWidget(self.stat_ph_lbl, 1, 1)
+        stats.addWidget(self.stat_archived_lbl, 2, 0, 1, 2)
+        fix_layout.addLayout(stats)
+        self.fix_summary_label = QLabel("")
+        self.fix_summary_label.hide()
+        fix_layout.addWidget(QLabel("<b>Detalle de modificaciones por archivo:</b>"))
+        self.fix_report_tree = QTreeWidget()
+        self.fix_report_tree.setHeaderLabels(["Archivo / Plataforma", "Modificación aplicada"])
+        self.fix_report_tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.fix_report_tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        fix_layout.addWidget(self.fix_report_tree, 1)
+        self.stacked_widget.addWidget(fix_page_widget)
 
-        # Conectar la selección del navbar a una función que emita la señal
         self.navbar_list_widget.currentRowChanged.connect(self._on_navbar_selection_changed)
-        # Establecer la fila actual DESPUÉS de que stacked_widget esté inicializado y tenga widgets
-        self.navbar_list_widget.setCurrentRow(0) # Seleccionar "Traductor" por defecto
+        self.navbar_list_widget.setCurrentRow(0)
+        right_panel_layout.addWidget(self.stacked_widget, 1)
 
-        # --- Panel Derecho (Contenedor de Stacked Widget, Progress Bar y Consola Globales) ---
-        right_panel_widget = QWidget()
-        right_panel_layout = QVBoxLayout(right_panel_widget)
-        right_panel_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Añadir el stacked widget al panel derecho
-        right_panel_layout.addWidget(self.stacked_widget, 1) # Usar factor de estiramiento 1
-
-        # Barra de progreso (compartida)
         self.progress_bar = QProgressBar()
         self.progress_bar.setAlignment(Qt.AlignCenter)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("Progreso: %p%")
         right_panel_layout.addWidget(self.progress_bar)
 
-        # Consola de salida (compartida)
-        right_panel_layout.addWidget(QLabel("Consola de salida"))
+        console_card = self._make_card()
+        console_layout = QVBoxLayout(console_card)
+        console_layout.setContentsMargins(10, 6, 10, 8)
+        console_layout.setSpacing(3)
+        console_layout.addWidget(QLabel("<b>Consola de salida y registros:</b>"))
         self.output = QTextEdit()
+        self.output.setFont(QFont("Consolas", 9))
         self.output.setReadOnly(True)
-        right_panel_layout.addWidget(self.output)
+        self.output.setMaximumHeight(120)
+        console_layout.addWidget(self.output)
+        right_panel_layout.addWidget(console_card)
 
-        # --- Añadir navbar y panel derecho al layout principal ---
-        main_horizontal_layout.addWidget(self.navbar_list_widget)
-        main_horizontal_layout.addWidget(right_panel_widget)
+        main_horizontal_layout.addWidget(nav_panel)
+        main_horizontal_layout.addWidget(right_panel_widget, 1)
+
+    @staticmethod
+    def _make_card():
+        card = QFrame()
+        card.setObjectName("card")
+        return card
+
+    @staticmethod
+    def _make_stat(label, color):
+        widget = QLabel(f"{label}: <b style='color:{color}'>0</b>")
+        widget.setTextFormat(Qt.RichText)
+        widget.setStyleSheet(
+            f"background:#1e293b; color:#cbd5e1; border:1px solid {color}; "
+            "border-radius:6px; padding:8px 12px;"
+        )
+        return widget
+
+    @staticmethod
+    def _application_stylesheet():
+        return """
+            QMainWindow, QWidget { background-color: #17191d; color: #e5e7eb; font-family: "Segoe UI"; font-size: 13px; }
+            QFrame#card, QLabel#banner { background-color: #1e2227; border: 1px solid #30353d; border-radius: 8px; }
+            QLabel#banner { padding: 10px 14px; }
+            QFrame#navigationPanel { background-color: #1d2126; border: 1px solid #30353d; border-radius: 12px; }
+            QLabel#brand { color: #f8fafc; padding: 4px 8px; }
+            QLabel#brandSubtitle { color: #66758a; font-size: 10px; font-weight: 700; letter-spacing: 2px; padding-left: 9px; }
+            QLabel#providerStatus { color: #4ade80; background: #17251e; border: 1px solid #244b34; border-radius: 7px; padding: 8px 10px; }
+            QListWidget#navigation { background-color: transparent; border: none; padding: 2px; outline: none; }
+            QListWidget#navigation::item { color: #aebbd0; min-height: 43px; padding: 7px 10px; margin: 3px 0; border-radius: 7px; }
+            QListWidget#navigation::item:hover { background-color: #252b33; color: white; }
+            QListWidget#navigation::item:selected { background-color: #2563eb; color: white; border: 1px solid #60a5fa; }
+            QLineEdit, QTextEdit, QComboBox, QTreeWidget { background-color: #1d2126; color: #e5e7eb; border: 1px solid #30353d; border-radius: 7px; padding: 7px; selection-background-color: #2563eb; }
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus { border: 1px solid #3b82f6; }
+            QComboBox::drop-down { border: none; width: 24px; }
+            QPushButton { background-color: #20242a; color: #e5e7eb; border: 1px solid #343a43; border-radius: 7px; padding: 8px 12px; }
+            QPushButton:hover { background-color: #2a3038; border-color: #4b5563; }
+            QPushButton:disabled { color: #68707d; background-color: #1b1e22; }
+            QPushButton#primaryButton { background-color: #2563eb; color: white; border-color: #3b82f6; font-weight: 700; }
+            QPushButton#primaryButton:hover { background-color: #1d4ed8; }
+            QProgressBar { background-color: #1d2126; border: 1px solid #30353d; border-radius: 5px; min-height: 17px; text-align: center; }
+            QProgressBar::chunk { background-color: #2563eb; border-radius: 4px; }
+            QTreeWidget::item { padding: 4px; }
+            QHeaderView::section { background-color: #252a31; color: #9fb0c8; border: none; border-right: 1px solid #343a43; padding: 7px; font-weight: 700; }
+            QCheckBox { spacing: 8px; }
+            QCheckBox::indicator { width: 17px; height: 17px; }
+            QTabWidget::pane { background:#1e2227; border:1px solid #343a43; border-radius:7px; top:-1px; }
+            QTabBar::tab { background:#20242a; color:#94a3b8; padding:9px 16px; border:1px solid #343a43; }
+            QTabBar::tab:selected { background:#2563eb; color:white; }
+            QScrollBar:vertical { background:#17191d; width:10px; margin:0; }
+            QScrollBar::handle:vertical { background:#3b4654; min-height:24px; border-radius:5px; }
+            QToolTip { background:#111827; color:white; border:1px solid #3b82f6; padding:5px; }
+        """
 
     def _on_navbar_selection_changed(self, row):
         """
@@ -277,6 +420,8 @@ class TranslatorAppView(QMainWindow):
         self.key_input.setEnabled(enabled)
         self.desc_input.setEnabled(enabled)
         self.platform_selector.setEnabled(enabled)
+        self.provider_selector.setEnabled(enabled)
+        self.config_ai_btn.setEnabled(enabled)
         self.select_folder_btn.setEnabled(enabled)
         
         # Batch Mode UI elements
@@ -288,6 +433,12 @@ class TranslatorAppView(QMainWindow):
             self.batch_platform_selector.setEnabled(enabled)
         if hasattr(self, 'batch_base_lang_input'):
             self.batch_base_lang_input.setEnabled(enabled)
+        if hasattr(self, 'run_fix_btn'):
+            self.run_fix_btn.setEnabled(enabled)
+        if hasattr(self, 'sync_missing_cb'):
+            self.sync_missing_cb.setEnabled(enabled)
+        if hasattr(self, 'cleanup_unexpected_cb'):
+            self.cleanup_unexpected_cb.setEnabled(enabled and self._current_platform == "flutter")
 
         # El botón de Flutter Intl Generate solo se habilita si la plataforma es Flutter
         self.flutter_intl_generate_btn.setEnabled(enabled and self._current_platform == "flutter")
@@ -304,6 +455,134 @@ class TranslatorAppView(QMainWindow):
     def show_critical_message(self, title, message):
         """Muestra un cuadro de diálogo de error crítico."""
         QMessageBox.critical(self, title, message)
+
+    def _open_ai_config_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Centro de Motores de Traducción")
+        dialog.setMinimumSize(650, 520)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel(
+            "<b style='font-size:18px'>Configurar motores inteligentes</b><br>"
+            "<span style='color:#94a3b8'>Conecta Ollama, LM Studio, OpenAI, DeepSeek, Groq "
+            "o cualquier endpoint compatible.</span>"
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        tabs = QTabWidget()
+
+        def provider_tab(config_key, default_url, default_model, cloud=False):
+            page = QWidget()
+            form = QVBoxLayout(page)
+            form.setContentsMargins(16, 16, 16, 16)
+            form.setSpacing(8)
+            config = self._provider_config.get(config_key, {})
+            badge = QLabel(
+                "☁️ Proveedor remoto OpenAI-compatible" if cloud
+                else "🤖 Servidor local OpenAI-compatible"
+            )
+            badge.setObjectName("banner")
+            form.addWidget(badge)
+            form.addWidget(QLabel("Endpoint base"))
+            url = QLineEdit(config.get("base_url", default_url))
+            url.setPlaceholderText(default_url)
+            form.addWidget(url)
+            form.addWidget(QLabel("Modelo"))
+            model = QLineEdit(config.get("model", default_model))
+            model.setPlaceholderText(default_model)
+            form.addWidget(model)
+            form.addWidget(QLabel("API Key" + ("" if cloud else " (opcional)")))
+            api_key = QLineEdit(config.get("api_key", ""))
+            api_key.setEchoMode(QLineEdit.Password)
+            api_key.setPlaceholderText("sk-..." if cloud else "No requerida normalmente")
+            form.addWidget(api_key)
+            test = QPushButton("🔍  Probar conexión y traducción")
+            test.clicked.connect(lambda: self.test_ai_connection_requested.emit({
+                "type": config_key, "base_url": url.text().strip(),
+                "model": model.text().strip(), "api_key": api_key.text().strip(),
+            }))
+            form.addWidget(test)
+            form.addStretch()
+            return page, url, model, api_key
+
+        local_page, local_url, local_model, local_key = provider_tab(
+            "local_ai", "http://localhost:11434/v1", "llama3.2"
+        )
+        cloud_page, cloud_url, cloud_model, cloud_key = provider_tab(
+            "cloud_ai", "https://api.deepseek.com/v1", "deepseek-chat", True
+        )
+        tabs.addTab(local_page, "🤖  IA Local")
+        tabs.addTab(cloud_page, "☁️  IA Cloud")
+        layout.addWidget(tabs, 1)
+        failover = QCheckBox(
+            "Failover automático: proveedor seleccionado → Google → MyMemory"
+        )
+        failover.setChecked(self._provider_config.get("auto_failover", True))
+        layout.addWidget(failover)
+        note = QLabel(
+            "🔒 La configuración se guarda localmente en translation_config.json. "
+            "No se envían credenciales salvo al endpoint configurado."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#94a3b8; padding:6px;")
+        layout.addWidget(note)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Cancelar")
+        cancel.clicked.connect(dialog.reject)
+        save = QPushButton("Guardar configuración")
+        save.setObjectName("primaryButton")
+
+        def save_config():
+            self.save_provider_config_requested.emit({
+                "active_provider": self.provider_selector.currentData(),
+                "auto_failover": failover.isChecked(),
+                "local_ai": {"base_url": local_url.text(), "model": local_model.text(), "api_key": local_key.text()},
+                "cloud_ai": {"base_url": cloud_url.text(), "model": cloud_model.text(), "api_key": cloud_key.text()},
+            })
+            dialog.accept()
+
+        save.clicked.connect(save_config)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        dialog.exec()
+
+    def update_provider_config_ui(self, config):
+        self._provider_config = config
+        active = config.get("active_provider", "google")
+        index = self.provider_selector.findData(active)
+        if index >= 0:
+            self.provider_selector.blockSignals(True)
+            self.provider_selector.setCurrentIndex(index)
+            self.provider_selector.blockSignals(False)
+        names = {
+            "google": "Google Multi-Tier", "local_ai": "IA Local",
+            "cloud_ai": "IA Cloud", "mymemory": "MyMemory",
+        }
+        fallback = " + failover" if config.get("auto_failover", True) else ""
+        self.provider_status_label.setText(f"●  {names.get(active, active)}{fallback}")
+
+    def show_ai_test_result(self, result):
+        if result.get("success"):
+            QMessageBox.information(self, "Prueba de conexión", result.get("message", "Conexión correcta."))
+        else:
+            QMessageBox.warning(self, "Prueba de conexión", result.get("message", "No fue posible conectar."))
+
+    def display_fix_files_report(self, result):
+        self.stat_files_lbl.setText(f"📁 Archivos corregidos: <b style='color:#60a5fa'>{result.get('files_fixed', 0)}</b>")
+        self.stat_synced_lbl.setText(f"🔄 Faltantes sincronizados: <b style='color:#c084fc'>{result.get('missing_synced', 0)}</b>")
+        self.stat_meta_lbl.setText(f"🏷 Metadatos @key añadidos: <b style='color:#4ade80'>{result.get('metadata_added', 0)}</b>")
+        self.stat_ph_lbl.setText(f"🧩 Placeholders generados: <b style='color:#facc15'>{result.get('placeholders_added', 0)}</b>")
+        self.stat_archived_lbl.setText(f"📦 ARB no configurados respaldados: <b style='color:#fb923c'>{result.get('unexpected_archived', 0)}</b>")
+        self.fix_report_tree.clear()
+        for detail in result.get('details', []):
+            parent = QTreeWidgetItem([
+                f"{detail.get('file', '')} / {detail.get('platform', '')}", ""
+            ])
+            for change in detail.get('changes', []):
+                parent.addChild(QTreeWidgetItem(["", str(change)]))
+            self.fix_report_tree.addTopLevelItem(parent)
+            parent.setExpanded(True)
 
     def show_history_dialog(self, history_data):
         """
@@ -353,23 +632,29 @@ class TranslatorAppView(QMainWindow):
         Ajusta la visibilidad y el texto de los elementos de la UI según la plataforma.
         """
         self._current_platform = platform # Actualiza el estado interno de la plataforma
+        if hasattr(self, 'cleanup_unexpected_cb'):
+            self.cleanup_unexpected_cb.setEnabled(platform == "flutter")
+        if hasattr(self, 'batch_platform_selector'):
+            batch_index = self.batch_platform_selector.findData(platform)
+            if batch_index >= 0:
+                self.batch_platform_selector.setCurrentIndex(batch_index)
         if platform == "flutter":
             self.desc_label.show()
             self.desc_input.show()
-            self.key_input.setPlaceholderText("Nombre de la etiqueta")
-            self.translate_button.setText("Traducir y Agregar Etiqueta")
-            self.create_files_btn.setText("Crear Archivos ARB")
-            self.delete_files_btn.setText("Eliminar Archivos ARB")
-            self.delete_key_btn.setText("Eliminar Etiqueta de Archivos")
+            self.key_input.setPlaceholderText("Nombre de la etiqueta (ej. 'similarToTitle')")
+            self.translate_button.setText("🚀  Traducir y Agregar a Todos los Idiomas")
+            self.create_files_btn.setText("📁  Crear Archivos")
+            self.delete_files_btn.setText("⚠️  Eliminar Todo")
+            self.delete_key_btn.setText("🗑️  Eliminar Clave")
             self.flutter_intl_generate_btn.show()
         elif platform == "kotlin":
             self.desc_label.hide()
             self.desc_input.hide()
             self.key_input.setPlaceholderText("Nombre del string (ej. 'app_name')")
-            self.translate_button.setText("Traducir y Agregar String")
-            self.create_files_btn.setText("Crear Carpetas y Archivos XML")
-            self.delete_files_btn.setText("Eliminar Carpetas y Archivos XML")
-            self.delete_key_btn.setText("Eliminar String de Archivos")
+            self.translate_button.setText("🚀  Traducir y Agregar a Todos los Idiomas")
+            self.create_files_btn.setText("📁  Crear Carpetas/XML")
+            self.delete_files_btn.setText("⚠️  Eliminar Todo")
+            self.delete_key_btn.setText("🗑️  Eliminar String")
             self.flutter_intl_generate_btn.hide()
         # Asegurar que el estado de los botones se actualice después de cambiar la visibilidad
         self.set_ui_enabled(True) # Se re-habilitarán y el controlador ajustará el estado final

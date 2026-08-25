@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "Joss Red Traductor"
-#define MyAppVersion "1.5"
+#define MyAppVersion "1.6"
 #define MyAppPublisher "JOSPROX MX"
 #define MyAppURL "https://josprox.com/"
 #define MyAppExeName "TraductorApp.exe"

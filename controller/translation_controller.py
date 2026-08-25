@@ -25,6 +25,10 @@ class TranslatorAppController(QObject):
     sig_undo_last = Signal(dict)
     sig_set_project_path = Signal(str)
     sig_translate_batch = Signal(dict)
+    sig_fix_files = Signal(dict)
+    sig_set_provider = Signal(str)
+    sig_save_provider_config = Signal(dict)
+    sig_test_ai_connection = Signal(dict)
 
     def __init__(self, app_instance):
         super().__init__()
@@ -59,6 +63,8 @@ class TranslatorAppController(QObject):
         self.worker.error_occurred.connect(self._on_worker_error, Qt.QueuedConnection)
         self.worker.command_output.connect(self.view.append_log, Qt.QueuedConnection)
         self.worker.history_ready.connect(self._on_history_ready, Qt.QueuedConnection)
+        self.worker.provider_config_ready.connect(self.view.update_provider_config_ui, Qt.QueuedConnection)
+        self.worker.ai_test_result.connect(self.view.show_ai_test_result, Qt.QueuedConnection)
 
         # Controlador -> Worker (commands)
         self.sig_translate_and_add.connect(self.worker.do_translate_and_add, Qt.QueuedConnection)
@@ -70,6 +76,10 @@ class TranslatorAppController(QObject):
         self.sig_undo_last.connect(self.worker.do_undo_last, Qt.QueuedConnection)
         self.sig_set_project_path.connect(self.worker.do_set_project_path, Qt.QueuedConnection)
         self.sig_translate_batch.connect(self.worker.do_translate_batch, Qt.QueuedConnection)
+        self.sig_fix_files.connect(self.worker.do_fix_files, Qt.QueuedConnection)
+        self.sig_set_provider.connect(self.worker.do_set_provider, Qt.QueuedConnection)
+        self.sig_save_provider_config.connect(self.worker.do_save_provider_config, Qt.QueuedConnection)
+        self.sig_test_ai_connection.connect(self.worker.do_test_ai_connection, Qt.QueuedConnection)
 
         # Señales desde la vista
         self._connect_view_signals()
@@ -97,6 +107,10 @@ class TranslatorAppController(QObject):
         self.view.show_history_requested.connect(self._handle_show_history)
         self.view.navigation_selected.connect(self._handle_navigation_selection)
         self.view.translate_batch_requested.connect(self._handle_translate_batch_request)
+        self.view.fix_files_requested.connect(self._handle_fix_files)
+        self.view.provider_changed.connect(self.sig_set_provider.emit)
+        self.view.save_provider_config_requested.connect(self.sig_save_provider_config.emit)
+        self.view.test_ai_connection_requested.connect(self.sig_test_ai_connection.emit)
 
     # ================= Utilidades =================
 
@@ -168,6 +182,16 @@ class TranslatorAppController(QObject):
         self.view.set_progress_bar_format("Creando archivos/carpetas: %p%")
         self.sig_create_assets.emit(platform)
 
+    def _handle_fix_files(self, data):
+        platform = data.get('platform')
+        if platform not in ('flutter', 'kotlin'):
+            self.view.append_log("⚠️ Selecciona Flutter (ARB) o Kotlin (XML).")
+            return
+        self.view.set_ui_enabled(False)
+        self.view.update_progress_bar(0)
+        self.view.set_progress_bar_format("Corrigiendo y sincronizando archivos: %p%")
+        self.sig_fix_files.emit(data)
+
     def _handle_delete_assets(self, platform):
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
@@ -209,6 +233,8 @@ class TranslatorAppController(QObject):
         p = result_data.get('platform', 'desconocida')
         p = p.upper() if isinstance(p, str) else str(p)
         self.view.append_log(f"Operación '{t}' finalizada para {p}.")
+        if t == 'fix_files':
+            self.view.display_fix_files_report(result_data)
         self.view.update_progress_bar(0)
         self._update_ui_state()
 
