@@ -774,7 +774,18 @@ class TranslationCore:
                     }
 
                     arb_data[key] = text
-                    arb_data[f"@{key}"] = {"description": desc}
+                    meta = arb_data.setdefault(f"@{key}", {})
+                    if not isinstance(meta, dict):
+                        meta = {}
+                        arb_data[f"@{key}"] = meta
+                    if desc:
+                        meta["description"] = desc
+                    variables = [token[1:-1] for token in re.findall(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", text)]
+                    if variables:
+                        ph = meta.setdefault("placeholders", {})
+                        if isinstance(ph, dict):
+                            for var_name in variables:
+                                ph.setdefault(var_name, {})
 
                     with open(current_path, "w", encoding="utf-8") as f:
                         json.dump(arb_data, f, indent=2, ensure_ascii=False)
@@ -1116,11 +1127,27 @@ class TranslationCore:
                         continue
                     if k.startswith("@"):
                         real_key = k[1:]
-                        if isinstance(v, dict) and "description" in v:
-                            descriptions[real_key] = v["description"]
+                        if isinstance(v, dict):
+                            descriptions[real_key] = v
+                        elif isinstance(v, str):
+                            descriptions[real_key] = {"description": v}
                     else:
                         if isinstance(v, str):
                             key_values[k] = v
+
+                # Auto-detección de placeholders en las claves del contenido base:
+                for k, v in key_values.items():
+                    variables = [token[1:-1] for token in re.findall(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", v)]
+                    if variables:
+                        meta = descriptions.setdefault(k, {})
+                        if isinstance(meta, str):
+                            meta = {"description": meta}
+                            descriptions[k] = meta
+                        ph = meta.setdefault("placeholders", {})
+                        if isinstance(ph, dict):
+                            for var_name in variables:
+                                ph.setdefault(var_name, {})
+
                 return "flutter", base_lang, key_values, descriptions
             except Exception as e:
                 raise ValueError(f"Error al parsear el JSON de ARB: {e}")
@@ -1187,11 +1214,30 @@ class TranslationCore:
                         }
                         
                         arb_data[key] = text
-                        desc = descriptions.get(key)
-                        if desc:
-                            metadata = arb_data.setdefault(f"@{key}", {})
-                            if isinstance(metadata, dict):
-                                metadata.setdefault("description", desc)
+                        meta_info = descriptions.get(key)
+                        metadata = arb_data.setdefault(f"@{key}", {})
+                        if not isinstance(metadata, dict):
+                            metadata = {}
+                            arb_data[f"@{key}"] = metadata
+
+                        if isinstance(meta_info, dict):
+                            if meta_info.get("description") and not metadata.get("description"):
+                                metadata["description"] = meta_info["description"]
+                            if meta_info.get("placeholders"):
+                                ph = metadata.setdefault("placeholders", {})
+                                if isinstance(ph, dict):
+                                    for pk, pv in meta_info["placeholders"].items():
+                                        ph.setdefault(pk, pv if isinstance(pv, dict) else {})
+                        elif isinstance(meta_info, str) and meta_info:
+                            metadata.setdefault("description", meta_info)
+
+                        # Auto-detección de placeholders en el texto:
+                        variables = [token[1:-1] for token in re.findall(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", text)]
+                        if variables:
+                            ph = metadata.setdefault("placeholders", {})
+                            if isinstance(ph, dict):
+                                for var_name in variables:
+                                    ph.setdefault(var_name, {})
 
                     self._atomic_write_text(
                         current_path,
@@ -1330,6 +1376,7 @@ class TranslationCore:
 
         source_records = {}
         source_descriptions = {}
+        source_placeholders = {}
         ordered_sources = sorted(
             loaded.items(),
             key=lambda item: 0 if item[1].get("@@locale") == "en" else 1,
@@ -1343,6 +1390,8 @@ class TranslationCore:
                 meta = data.get(f"@{key}")
                 if isinstance(meta, dict):
                     source_descriptions.setdefault(key, meta.get("description", ""))
+                    if isinstance(meta.get("placeholders"), dict):
+                        source_placeholders.setdefault(key, meta["placeholders"])
 
         translations = {}
         if sync_missing and source_records:
@@ -1373,19 +1422,22 @@ class TranslationCore:
                 data["@@locale"] = locale
                 changes.append(f"@@locale establecido en '{locale}'")
 
-            for key, (source_locale, source_text) in source_records.items():
-                if sync_missing and (key not in data or not str(data.get(key, "")).strip()):
-                    translated = (
-                        source_text if locale == source_locale
-                        else translations.get(source_locale, {}).get(locale, {}).get(key)
-                    )
-                    if translated:
-                        data[key] = translated
-                        result["missing_synced"] += 1
-                        result["keys_fixed"] += 1
-                        changes.append(f"Traducción faltante añadida: {key}")
+            if sync_missing:
+                for key, (source_locale, source_text) in source_records.items():
+                    if key not in data or not str(data.get(key, "")).strip():
+                        translated = (
+                            source_text if locale == source_locale
+                            else translations.get(source_locale, {}).get(locale, {}).get(key)
+                        )
+                        if translated:
+                            data[key] = translated
+                            result["missing_synced"] += 1
+                            result["keys_fixed"] += 1
+                            changes.append(f"Traducción faltante añadida: {key}")
 
-                if key not in data:
+            # Revisión exhaustiva y certera de todas las claves para metadatos y placeholders
+            for key in list(data.keys()):
+                if key.startswith("@") or not isinstance(data[key], str):
                     continue
                 meta_key = f"@{key}"
                 meta = data.get(meta_key)
@@ -1394,14 +1446,36 @@ class TranslationCore:
                     data[meta_key] = meta
                     result["metadata_added"] += 1
                     changes.append(f"Metadato añadido: {meta_key}")
+
                 if source_descriptions.get(key) and not meta.get("description"):
                     meta["description"] = source_descriptions[key]
-                variables = [token[1:-1] for token in re.findall(r"\{[A-Za-z_][A-Za-z0-9_]*\}", data[key])]
-                if variables:
+
+                # Detectar variables del propio texto
+                detected_vars = [token[1:-1] for token in re.findall(r"\{[A-Za-z_][A-Za-z0-9_]*\}", data[key])]
+                expected_vars = list(dict.fromkeys(detected_vars))
+
+                # Incorporar variables del texto base/fuente si aplica
+                if key in source_records:
+                    src_vars = [token[1:-1] for token in re.findall(r"\{[A-Za-z_][A-Za-z0-9_]*\}", source_records[key][1])]
+                    for sv in src_vars:
+                        if sv not in expected_vars:
+                            expected_vars.append(sv)
+
+                # Incorporar placeholders ya definidos en el origen
+                if key in source_placeholders:
+                    for pv in source_placeholders[key].keys():
+                        if pv not in expected_vars:
+                            expected_vars.append(pv)
+
+                if expected_vars:
                     placeholders = meta.setdefault("placeholders", {})
-                    missing_vars = [name for name in variables if name not in placeholders]
+                    if not isinstance(placeholders, dict):
+                        placeholders = {}
+                        meta["placeholders"] = placeholders
+                    missing_vars = [name for name in expected_vars if name not in placeholders]
                     for name in missing_vars:
-                        placeholders[name] = {}
+                        src_ph_def = source_placeholders.get(key, {}).get(name)
+                        placeholders[name] = src_ph_def if isinstance(src_ph_def, dict) else {}
                     if missing_vars:
                         result["placeholders_added"] += len(missing_vars)
                         changes.append(f"Placeholders añadidos en {meta_key}: {', '.join(missing_vars)}")
