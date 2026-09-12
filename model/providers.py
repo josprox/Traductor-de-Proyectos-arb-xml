@@ -126,12 +126,41 @@ class ArgosTranslateProvider(BaseTranslationProvider):
         self.log(f"✅ Modelo Argos {source} → {target} instalado.")
         return True
 
+    def _has_installed_translation(self, source, target):
+        return self._get_translation(source, target) is not None
+
+    def can_translate(self, source, target):
+        """Determina de antemano si Argos puede traducir un par de idiomas con los modelos actualmente instalados."""
+        if not self.is_available():
+            return False
+        source = normalize_language_code(source)
+        target = normalize_language_code(target)
+        if source == target:
+            return True
+        if self._has_installed_translation(source, target):
+            return True
+        if source != "en" and target != "en":
+            if self._has_installed_translation(source, "en") and self._has_installed_translation("en", target):
+                return True
+        return False
+
     def _get_available_packages(self):
         if self._available_packages is None:
-            self.log("🔎 Actualizando catálogo de modelos Argos...")
-            self.package_module.update_package_index()
-            self._available_packages = self.package_module.get_available_packages()
-        return self._available_packages
+            try:
+                self._available_packages = self.package_module.get_available_packages()
+            except Exception:
+                pass
+            if not self._available_packages:
+                try:
+                    self.package_module.update_package_index()
+                    self._available_packages = self.package_module.get_available_packages()
+                except Exception as exc:
+                    self.log(f"⚠️ No se pudo obtener catálogo de Argos: {exc}")
+        return self._available_packages or []
+
+    def preinstall_languages(self, source, target_langs):
+        """Preinstalación pasiva: Argos traduce offline con los modelos disponibles."""
+        return
 
     def _ensure_translation(self, source, target):
         pair = (source, target)
@@ -191,15 +220,24 @@ class ArgosTranslateProvider(BaseTranslationProvider):
         target = normalize_language_code(target_lang)
         if source == target:
             return protected_text
-        translation = self._ensure_translation(source, target)
-        if translation is None:
+        if not self.can_translate(source, target):
             pair = (source, target)
             if pair not in self._reported_pairs:
                 self._reported_pairs.add(pair)
                 self.log(f"ℹ️ Argos no dispone del modelo {source} → {target}; usando respaldo.")
             return None
+        translation = self._get_translation(source, target)
+        if translation is None:
+            return None
         with self._model_lock:
-            return self._translate_preserving_tokens(translation, protected_text)
+            result = self._translate_preserving_tokens(translation, protected_text)
+            if result and len(result) > 30:
+                prefix = result[:8]
+                if result.count(prefix) > 3:
+                    self._failed_pairs.add((source, target))
+                    self.log(f"⚠️ Modelo Argos {source} → {target} devolvió repetición degenerativa; usando respaldo.")
+                    return None
+            return result
 
 
 class GoogleTranslateProvider(BaseTranslationProvider):
@@ -209,7 +247,7 @@ class GoogleTranslateProvider(BaseTranslationProvider):
 
     def __init__(self, session=None, log_callback=None):
         super().__init__(session=session, log_callback=log_callback)
-        self._request_gate = threading.BoundedSemaphore(2)
+        self._request_gate = threading.BoundedSemaphore(4)
         self._cooldown_until = 0.0
         self._cooldown_lock = threading.Lock()
         self._rate_limit_reported = False
@@ -220,54 +258,53 @@ class GoogleTranslateProvider(BaseTranslationProvider):
         google_aliases = {"nb": "no", "zh": "zh-CN"}
         source = google_aliases.get(source, source)
         target = google_aliases.get(target, target)
+
+        try_primary = True
         with self._cooldown_lock:
             if time.monotonic() < self._cooldown_until:
-                return None
-        for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
-            try:
-                params = {
-                    "client": "gtx", "sl": source, "tl": target,
-                    "dt": "t", "q": protected_text,
-                }
-                with self._request_gate:
-                    # Varias tareas pueden haber esperado el semáforo antes del
-                    # primer 429. Se vuelve a comprobar aquí para cortar la cola.
-                    with self._cooldown_lock:
-                        if time.monotonic() < self._cooldown_until:
-                            return None
-                    response = self.session.get(self.PRIMARY_URL, params=params, timeout=15)
-                if response.status_code == 429:
-                    with self._cooldown_lock:
-                        self._cooldown_until = time.monotonic() + 60
-                        should_log = not self._rate_limit_reported
-                        self._rate_limit_reported = True
-                    if should_log:
-                        self.log("⚠️ Google limitó temporalmente las solicitudes (429). "
-                                 "Se pausará Google durante 60 segundos y se usará el respaldo configurado.")
-                    return None
-                response.raise_for_status()
-                with self._cooldown_lock:
-                    self._rate_limit_reported = False
-                data = response.json()
-                translated = "".join(
-                    segment[0] for segment in (data[0] if data and data[0] else [])
-                    if isinstance(segment, list) and segment and isinstance(segment[0], str)
-                )
-                if translated:
-                    return translated
-            except Exception as exc:
-                if attempt == MAX_RETRY_ATTEMPTS:
-                    self.log(f"⚠️ Google API falló: {exc}. Intentando endpoint alternativo...")
-                else:
+                try_primary = False
+
+        if try_primary:
+            for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
+                try:
+                    params = {
+                        "client": "gtx", "sl": source, "tl": target,
+                        "dt": "t", "q": protected_text,
+                    }
+                    with self._request_gate:
+                        with self._cooldown_lock:
+                            if time.monotonic() < self._cooldown_until:
+                                break
+                        response = self.session.get(self.PRIMARY_URL, params=params, timeout=10)
+                    if response.status_code == 429:
+                        with self._cooldown_lock:
+                            self._cooldown_until = time.monotonic() + 30
+                        break
+                    response.raise_for_status()
+                    data = response.json()
+                    translated = "".join(
+                        segment[0] for segment in (data[0] if data and data[0] else [])
+                        if isinstance(segment, list) and segment and isinstance(segment[0], str)
+                    )
+                    if translated:
+                        return translated
+                except Exception as exc:
+                    if attempt == MAX_RETRY_ATTEMPTS:
+                        break
                     time.sleep(0.2 * attempt)
+
         try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
             response = self.session.get(
                 self.FALLBACK_URL,
                 params={"sl": source, "tl": target, "q": protected_text},
-                timeout=15,
+                headers=headers,
+                timeout=10,
             )
             response.raise_for_status()
             match = re.search(r'class="result-container">(.*?)</div>', response.text, re.DOTALL)
+            if not match:
+                match = re.search(r'class="result-container">([^<]+)<', response.text)
             return html.unescape(match.group(1)).strip() if match else None
         except Exception as exc:
             self.log(f"⚠️ Google Translate no disponible: {exc}")
@@ -276,6 +313,7 @@ class GoogleTranslateProvider(BaseTranslationProvider):
 
 class OpenAICompatibleProvider(BaseTranslationProvider):
     display_name = "IA OpenAI-Compatible"
+    supports_multi_target = True
 
     def __init__(self, base_url="http://localhost:11434/v1", api_key="", model="llama3.2",
                  session=None, log_callback=None):
@@ -283,15 +321,55 @@ class OpenAICompatibleProvider(BaseTranslationProvider):
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or ""
         self.model = model or ""
+        self._cooldown_until = 0.0
+        self._cooldown_lock = threading.Lock()
+        self._rate_limit_reported = False
 
     def is_available(self):
-        return bool(self.base_url and self.model)
+        if not (self.base_url and self.model):
+            return False
+        if "localhost" not in self.base_url and "127.0.0.1" not in self.base_url and not self.api_key:
+            return False
+        with self._cooldown_lock:
+            return time.monotonic() >= self._cooldown_until
 
     def _headers(self):
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
+
+    @staticmethod
+    def _extract_json_dict(content):
+        if not content:
+            return {}
+        text = content.strip()
+        if "```" in text:
+            match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+            if match:
+                text = match.group(1).strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return {str(k).strip(): v for k, v in data.items() if v is not None}
+        except Exception:
+            pass
+        return {}
+
+    def _handle_rate_limit(self):
+        with self._cooldown_lock:
+            self._cooldown_until = time.monotonic() + 60.0
+            should_log = not self._rate_limit_reported
+            self._rate_limit_reported = True
+        if should_log:
+            self.log(
+                f"⚠️ IA {self.model} superó su límite de cuota (429). "
+                "Pausando la IA durante 60 segundos y activando ARGOS directo como respaldo."
+            )
 
     def translate_single(self, base_lang, target_lang, protected_text):
         if not self.is_available():
@@ -310,23 +388,146 @@ class OpenAICompatibleProvider(BaseTranslationProvider):
                 {"role": "user", "content": prompt},
             ],
         }
-        for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
-            try:
+        try:
+            response = self.session.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(), json=payload, timeout=45,
+            )
+            if response.status_code == 429:
+                self._handle_rate_limit()
+                return None
+            response.raise_for_status()
+            with self._cooldown_lock:
+                self._rate_limit_reported = False
+            content = response.json()["choices"][0]["message"]["content"].strip()
+            if content.startswith("```") and content.endswith("```"):
+                content = re.sub(r"^```(?:text)?\s*|\s*```$", "", content).strip()
+            return content or None
+        except Exception as exc:
+            with self._cooldown_lock:
+                self._cooldown_until = time.monotonic() + 300
+            self.log(f"⚠️ IA {self.model} no respondió: {exc}")
+        return None
+
+    def translate_multi_target(self, base_lang, target_langs, protected_text):
+        if not self.is_available() or not target_langs:
+            return {}
+        needed = [l for l in target_langs if l != base_lang]
+        if not needed:
+            return {}
+        system_prompt = (
+            "You are a professional software localization translator. "
+            "Translate the given text into each of the specified target languages.\n"
+            "STRICT RULES:\n"
+            "1. Output ONLY a valid JSON object mapping each target language code to its translated text.\n"
+            "2. Preserve every placeholder, token, variable, and tag exactly as given "
+            "(e.g. ___PH_0___, {name}, %s, XML tags).\n"
+            "3. Do NOT wrap in markdown fences or include explanations, notes, or extra keys."
+        )
+        user_prompt = (
+            f"Source language: {base_lang}\n"
+            f"Target languages: {json.dumps(needed)}\n\n"
+            f"TEXT TO TRANSLATE:\n{protected_text}"
+        )
+        payload = {
+            "model": self.model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            response = self.session.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(), json=payload, timeout=60,
+            )
+            if response.status_code == 429:
+                self._handle_rate_limit()
+                return {}
+            if response.status_code == 400 and "response_format" in payload:
+                del payload["response_format"]
                 response = self.session.post(
                     f"{self.base_url}/chat/completions",
                     headers=self._headers(), json=payload, timeout=60,
                 )
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"].strip()
-                if content.startswith("```") and content.endswith("```"):
-                    content = re.sub(r"^```(?:text)?\s*|\s*```$", "", content).strip()
-                return content or None
-            except Exception as exc:
-                if attempt == MAX_RETRY_ATTEMPTS:
-                    self.log(f"⚠️ IA {self.model} no respondió: {exc}")
-                else:
-                    time.sleep(0.35 * attempt)
-        return None
+            response.raise_for_status()
+            with self._cooldown_lock:
+                self._rate_limit_reported = False
+            content = response.json()["choices"][0]["message"]["content"].strip()
+            raw_map = self._extract_json_dict(content)
+            return {str(k).strip(): str(v).strip() for k, v in raw_map.items() if isinstance(v, str)}
+        except Exception as exc:
+            self.log(f"⚠️ IA multi-traducción ({self.model}) falló: {exc}")
+        return {}
+
+    def translate_chunk_multi_target(self, base_lang, target_langs, protected_items):
+        """
+        Traduce un mini-lote de textos en 1 sola llamada HTTP.
+        protected_items: [(item_id, text), ...]
+        Retorna: {item_id: {lang_code: translated_text}}
+        """
+        if not self.is_available() or not target_langs or not protected_items:
+            return {}
+        needed_langs = [l for l in target_langs if l != base_lang]
+        if not needed_langs:
+            return {}
+        items_dict = {str(item_id): text for item_id, text in protected_items}
+        system_prompt = (
+            "You are a professional software localization translator. "
+            "Translate each of the provided numbered items into all the specified target languages.\n"
+            "STRICT RULES:\n"
+            "1. Output ONLY a valid JSON object formatted as:\n"
+            '   {"item_id": {"lang_code": "translated_text", ...}, ...}\n'
+            "2. Preserve every placeholder, token, variable, and tag exactly as given "
+            "(e.g. ___PH_0___, {name}, %s, XML tags).\n"
+            "3. Do NOT wrap in markdown fences or include explanations or extra keys."
+        )
+        user_prompt = (
+            f"Source language: {base_lang}\n"
+            f"Target languages: {json.dumps(needed_langs)}\n\n"
+            f"ITEMS TO TRANSLATE (JSON):\n{json.dumps(items_dict, ensure_ascii=False)}"
+        )
+        payload = {
+            "model": self.model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            response = self.session.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(), json=payload, timeout=90,
+            )
+            if response.status_code == 429:
+                self._handle_rate_limit()
+                return {}
+            if response.status_code == 400 and "response_format" in payload:
+                del payload["response_format"]
+                response = self.session.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=self._headers(), json=payload, timeout=90,
+                )
+            response.raise_for_status()
+            with self._cooldown_lock:
+                self._rate_limit_reported = False
+            content = response.json()["choices"][0]["message"]["content"].strip()
+            raw_dict = self._extract_json_dict(content)
+            results = {}
+            for item_id, lang_dict in raw_dict.items():
+                if isinstance(lang_dict, dict):
+                    results[str(item_id)] = {
+                        str(k).strip(): str(v).strip()
+                        for k, v in lang_dict.items() if isinstance(v, str)
+                    }
+            return results
+        except Exception as exc:
+            self.log(f"⚠️ IA mini-lote ({self.model}) falló: {exc}")
+        return {}
 
     def check_health(self):
         if not self.is_available():
@@ -347,22 +548,24 @@ class MyMemoryProvider(BaseTranslationProvider):
     def translate_single(self, base_lang, target_lang, protected_text):
         base_lang = normalize_language_code(base_lang)
         target_lang = normalize_language_code(target_lang)
-        for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
-            try:
-                response = self.session.get(
-                    self.URL,
-                    params={"q": protected_text, "langpair": f"{base_lang}|{target_lang}"},
-                    timeout=15,
-                )
-                response.raise_for_status()
-                translated = response.json().get("responseData", {}).get("translatedText")
+        try:
+            response = self.session.get(
+                self.URL,
+                params={
+                    "q": protected_text,
+                    "langpair": f"{base_lang}|{target_lang}",
+                    "de": "joss_red_translator@gmail.com",
+                },
+                timeout=6,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("responseStatus") == 200:
+                translated = data.get("responseData", {}).get("translatedText")
                 if translated:
                     return html.unescape(translated)
-            except Exception as exc:
-                if attempt == MAX_RETRY_ATTEMPTS:
-                    self.log(f"⚠️ MyMemory no disponible: {exc}")
-                else:
-                    time.sleep(0.2 * attempt)
+        except Exception as exc:
+            self.log(f"⚠️ MyMemory ({target_lang}): {exc}")
         return None
 
 
@@ -376,6 +579,7 @@ class TranslationProviderManager:
         self.log_callback = log_callback or (lambda _message: None)
         self.config_path = os.path.join(self.config_dir, self.CONFIG_FILE)
         self._reported_fallbacks = set()
+        self._reported_unconfigured = set()
         self.config = {
             "config_version": self.CONFIG_VERSION,
             "active_provider": "argos",
@@ -466,16 +670,48 @@ class TranslationProviderManager:
         name = provider_name or self.config.get("active_provider", "argos")
         return self.providers.get(name, self.providers["google"])
 
+    def supports_multi_target(self):
+        active = self.get_provider()
+        return bool(getattr(active, "supports_multi_target", False))
+
+    def translate_multi_target_with_failover(self, base_lang, target_langs, protected_text):
+        active_name = self.config.get("active_provider", "argos")
+        active = self.get_provider(active_name)
+        if getattr(active, "supports_multi_target", False) and active.is_available():
+            try:
+                results = active.translate_multi_target(base_lang, target_langs, protected_text)
+                if results and isinstance(results, dict):
+                    return results
+            except Exception as exc:
+                self.log_callback(f"⚠️ Error en multi-traducción con {active_name}: {exc}")
+        return {}
+
+    def translate_chunk_multi_target(self, base_lang, target_langs, protected_items):
+        active_name = self.config.get("active_provider", "argos")
+        active = self.get_provider(active_name)
+        if getattr(active, "supports_multi_target", False) and active.is_available():
+            try:
+                results = active.translate_chunk_multi_target(base_lang, target_langs, protected_items)
+                if results and isinstance(results, dict):
+                    return results
+            except Exception as exc:
+                self.log_callback(f"⚠️ Error en mini-lote con {active_name}: {exc}")
+        return {}
+
     def translate_single_with_failover(self, base_lang, target_lang, protected_text):
         active_name = self.config.get("active_provider", "argos")
         auto_failover = self.config.get("auto_failover", True)
         chain = [active_name]
         if auto_failover:
-            chain.extend(name for name in ("argos", "google", "mymemory") if name not in chain)
+            for candidate in ("argos", "cloud_ai", "local_ai", "google", "mymemory"):
+                if candidate not in chain:
+                    chain.append(candidate)
         for name in chain:
             provider = self.get_provider(name)
             if not provider.is_available():
-                self.log_callback(f"ℹ️ {name} no está configurado; probando el siguiente proveedor.")
+                if name not in self._reported_unconfigured:
+                    self._reported_unconfigured.add(name)
+                    self.log_callback(f"ℹ️ {name} no está configurado; probando el siguiente proveedor.")
                 continue
             try:
                 translated = provider.translate_single(base_lang, target_lang, protected_text)

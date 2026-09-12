@@ -88,7 +88,15 @@ class TranslationCore:
 
     def _log(self, message):
         """Envía un mensaje a la función de log configurada."""
-        self.log_callback(message)
+        try:
+            self.log_callback(message)
+        except UnicodeEncodeError:
+            try:
+                self.log_callback(str(message).encode("ascii", "replace").decode("ascii"))
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _initialize_log_file(self):
         """
@@ -400,6 +408,7 @@ class TranslationCore:
             'ar': 'ar', 'be': 'be', 'bg': 'bg', 'bn': 'bn', 'bs': 'bs', 'cs': 'cs', 'de': 'de',
             'el': 'el', 'en': 'en', 'es': 'es', 'et': 'et', 'fa': 'fa', 'fi': 'fi', 'fr': 'fr',
             'hi': 'hi', 'hr': 'hr', 'hu': 'hu', 'id': 'id', 'it': 'it', 'ja': 'ja', 'ko': 'ko',
+
             'ml': 'ml', 'nb': 'no', 'ne': 'ne', 'nl': 'nl', 'or': 'or', 'pa': 'pa', 'pl': 'pl',
             'pt': 'pt', 'ru': 'ru', 'sv': 'sv', 'ta': 'ta', 'tr': 'tr', 'uk': 'uk', 'vi': 'vi',
             'zh': 'zh-CN'
@@ -407,6 +416,73 @@ class TranslationCore:
 
         # Proteger placeholders antes de enviar a traducir
         protected_text, placeholders = self.protect_placeholders(original_text)
+
+        manager = getattr(self, "provider_manager", None)
+        active_provider = getattr(manager, "config", {}).get("active_provider", "argos") if manager else "argos"
+
+        # 1. Cargar desde caché o si es base_lang
+        for lang in target_langs:
+            if lang == base_lang:
+                translations[lang] = original_text
+            elif (base_lang, lang, original_text) in self._translation_cache:
+                translations[lang] = self._translation_cache[(base_lang, lang, original_text)]
+
+        pending_langs = [lang for lang in target_langs if lang not in translations]
+        if not pending_langs:
+            return translations
+
+        # 2. Si el motor principal es IA y está activo, traducir con IA primero
+        if active_provider in ("cloud_ai", "local_ai") and manager and manager.supports_multi_target():
+            self._log(f"🌐 Solicitando traducción multi-idioma ({len(pending_langs)} idiomas) con IA...")
+            multi_map = manager.translate_multi_target_with_failover(base_lang, pending_langs, protected_text)
+            for lang_code, translated in multi_map.items():
+                if translated and isinstance(translated, str):
+                    restored = self.restore_placeholders(translated, placeholders)
+                    if self._placeholder_signature(restored) == self._placeholder_signature(original_text):
+                        self._translation_cache[(base_lang, lang_code, original_text)] = restored
+                        translations[lang_code] = restored
+            pending_langs = [l for l in target_langs if l not in translations]
+            if not pending_langs:
+                return translations
+
+        # 3. Paso 1: Argos Local traduce PRIMERO solo si es el motor seleccionado
+        argos = getattr(manager, "providers", {}).get("argos") if manager else None
+        if active_provider == "argos" and argos and argos.is_available() and hasattr(argos, "can_translate") and pending_langs:
+            argos_capable = [l for l in pending_langs if argos.can_translate(base_lang, l)]
+            for lang_code in argos_capable:
+                translated = argos.translate_single(base_lang, lang_code, protected_text)
+                if translated:
+                    restored = self.restore_placeholders(translated, placeholders)
+                    if self._placeholder_signature(restored) == self._placeholder_signature(original_text):
+                        self._translation_cache[(base_lang, lang_code, original_text)] = restored
+                        translations[lang_code] = restored
+
+            pending_langs = [l for l in target_langs if l not in translations]
+            if not pending_langs:
+                return translations
+
+        # 4. Paso 2: Para los idiomas que Argos no soporta (ej. be, ml, or, pa), entra la IA
+        ai_provider = None
+        if manager:
+            providers_map = getattr(manager, "providers", {})
+            for ai_name in ("cloud_ai", "local_ai"):
+                cand = providers_map.get(ai_name)
+                if cand and getattr(cand, "supports_multi_target", False) and cand.is_available():
+                    ai_provider = cand
+                    break
+        if ai_provider and pending_langs:
+            self._log(f"🌐 Solicitando idiomas no cubiertos por Argos ({len(pending_langs)} idiomas) con IA...")
+            multi_map = ai_provider.translate_multi_target(base_lang, pending_langs, protected_text)
+            for lang_code, translated in multi_map.items():
+                if translated and isinstance(translated, str):
+                    restored = self.restore_placeholders(translated, placeholders)
+                    if self._placeholder_signature(restored) == self._placeholder_signature(original_text):
+                        self._translation_cache[(base_lang, lang_code, original_text)] = restored
+                        translations[lang_code] = restored
+
+            pending_langs = [l for l in target_langs if l not in translations]
+            if not pending_langs:
+                return translations
 
         # Función auxiliar para traducir un solo idioma
         def translate_single(target_code):
@@ -458,9 +534,10 @@ class TranslationCore:
             self._log(f"⚠️ No se pudo traducir a {target_code}: {last_error}")
             return target_code, None
 
-        # Ejecución paralela
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_lang = {executor.submit(translate_single, lang): lang for lang in target_langs}
+        # Ejecución paralela solo para los idiomas que queden pendientes
+        workers = min(10, len(pending_langs)) if pending_langs else 1
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_lang = {executor.submit(translate_single, lang): lang for lang in pending_langs}
             for future in concurrent.futures.as_completed(future_to_lang):
                 lang_code = future_to_lang[future]
                 try:
@@ -494,20 +571,87 @@ class TranslationCore:
         batch = {lang: {} for lang in self._unique(targets)}
         if not text_to_keys:
             return batch
+
+        manager = getattr(self, "provider_manager", None)
         completed = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(text_to_keys))) as executor:
-            futures = {
-                executor.submit(self.fetch_translations_from_api, base_lang, text, platform): text
-                for text in text_to_keys
-            }
-            for future in concurrent.futures.as_completed(futures):
-                source_text = futures[future]
-                translations = future.result()
-                for lang, translated in translations.items():
-                    for key in text_to_keys[source_text]:
-                        batch.setdefault(lang, {})[key] = translated
-                completed += 1
-                progress_callback(int(completed / len(futures) * 90))
+        unique_texts = list(text_to_keys.keys())
+        total = len(unique_texts)
+        remaining_texts = []
+
+        can_chunk = (
+            manager is not None
+            and callable(getattr(manager, "supports_multi_target", None))
+            and manager.supports_multi_target()
+            and callable(getattr(manager, "translate_chunk_multi_target", None))
+        )
+
+        CHUNK_SIZE = 6
+
+        if can_chunk:
+            for i in range(0, len(unique_texts), CHUNK_SIZE):
+                chunk = unique_texts[i : i + CHUNK_SIZE]
+                if not manager.supports_multi_target():
+                    remaining_texts.extend(unique_texts[i:])
+                    break
+
+                chunk_payload = []
+                chunk_placeholders = {}
+                for idx, text in enumerate(chunk):
+                    item_id = str(idx)
+                    protected, ph = self.protect_placeholders(text)
+                    chunk_payload.append((item_id, protected))
+                    chunk_placeholders[item_id] = (text, ph)
+
+                self._log(f"🌐 Solicitando mini-lote de {len(chunk)} textos a la IA ({len(targets)} idiomas)...")
+                chunk_results = manager.translate_chunk_multi_target(base_lang, targets, chunk_payload)
+
+                if not chunk_results:
+                    # Si el mini-lote falló o la IA entró en cooldown, pasar a procesamiento individual
+                    remaining_texts.extend(unique_texts[i:])
+                    break
+
+                for item_id, (text, ph) in chunk_placeholders.items():
+                    lang_translations = chunk_results.get(item_id, {})
+                    valid_for_text = {}
+                    for lang, translated in lang_translations.items():
+                        if translated and isinstance(translated, str):
+                            restored = self.restore_placeholders(translated, ph)
+                            if self._placeholder_signature(restored) == self._placeholder_signature(text):
+                                self._translation_cache[(base_lang, lang, text)] = restored
+                                valid_for_text[lang] = restored
+
+                    missing_targets = [l for l in targets if l != base_lang and l not in valid_for_text]
+                    if missing_targets:
+                        resolved = self.fetch_translations_from_api(base_lang, text, platform)
+                        valid_for_text.update(resolved)
+                    else:
+                        valid_for_text[base_lang] = text
+
+                    for lang, trans_val in valid_for_text.items():
+                        for key in text_to_keys[text]:
+                            batch.setdefault(lang, {})[key] = trans_val
+
+                    completed += 1
+                    progress_callback(int(completed / total * 90))
+        else:
+            remaining_texts = unique_texts
+
+        if remaining_texts:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(remaining_texts))) as executor:
+                futures = {
+                    executor.submit(self.fetch_translations_from_api, base_lang, text, platform): text
+                    for text in remaining_texts
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    source_text = futures[future]
+                    translations = future.result()
+                    for lang, translated in translations.items():
+                        for key in text_to_keys[source_text]:
+                            batch.setdefault(lang, {})[key] = translated
+                    completed += 1
+                    pct = int(completed / total * 90)
+                    self._log(f"⚡ [{completed}/{total}] ({pct}%) Traducido: '{source_text[:35]}...'")
+                    progress_callback(pct)
         return batch
 
     def translate_missing_for_target(self, base_lang, target_lang, key_values,

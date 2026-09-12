@@ -155,6 +155,154 @@ class ProviderManagerTests(unittest.TestCase):
             fallback_logs = [message for message in logs if "Respaldo activo" in message]
             self.assertEqual(len(fallback_logs), 1)
 
+    def test_extract_json_dict_handles_markdown_and_raw_json(self):
+        from model.providers import OpenAICompatibleProvider
+        
+        # Raw json
+        raw = '{"en": "Hello", "fr": "Bonjour"}'
+        self.assertEqual(OpenAICompatibleProvider._extract_json_dict(raw), {"en": "Hello", "fr": "Bonjour"})
+
+        # Markdown json fence
+        fenced = '```json\n{"es": "Hola", "de": "Hallo"}\n```'
+        self.assertEqual(OpenAICompatibleProvider._extract_json_dict(fenced), {"es": "Hola", "de": "Hallo"})
+
+        # Extra conversational text around json
+        conversational = 'Here are your translations:\n{"it": "Ciao", "pt": "Ola"}\nHope this helps!'
+        self.assertEqual(OpenAICompatibleProvider._extract_json_dict(conversational), {"it": "Ciao", "pt": "Ola"})
+
+    def test_multi_target_provider_support_and_dispatch(self):
+        from model.translation_model import TranslationCore
+        with tempfile.TemporaryDirectory() as directory:
+            manager = TranslationProviderManager(directory)
+            
+            class FakeMultiTargetProvider:
+                supports_multi_target = True
+                def __init__(self):
+                    self.calls = []
+                def is_available(self):
+                    return True
+                def translate_multi_target(self, base_lang, target_langs, protected_text):
+                    self.calls.append((base_lang, target_langs, protected_text))
+                    # Returns translations for all requested targets
+                    return {lang: f"{protected_text}_{lang}" for lang in target_langs}
+                def translate_single(self, base_lang, target_lang, protected_text):
+                    return f"{protected_text}_{target_lang}"
+
+            multi_provider = FakeMultiTargetProvider()
+            manager.providers["cloud_ai"] = multi_provider
+            manager.config["active_provider"] = "cloud_ai"
+
+            core = TranslationCore(directory, lambda _msg: None)
+            core.provider_manager = manager
+
+            translations = core.fetch_translations_from_api("es", "Hola", "flutter")
+            
+            # Debería haber hecho exactamente 1 llamada multi-target
+            self.assertEqual(len(multi_provider.calls), 1)
+            self.assertEqual(multi_provider.calls[0][0], "es")
+            # Debería tener las 30 traducciones completadas
+            self.assertEqual(len(translations), len(core.FLUTTER_LANGUAGE_FILES))
+            self.assertEqual(translations["es"], "Hola")
+            self.assertEqual(translations["en"], "Hola_en")
+            self.assertEqual(translations["fr"], "Hola_fr")
+
+    def test_chunk_multi_target_fallback_to_argos_on_rate_limit(self):
+        from model.translation_model import TranslationCore
+        with tempfile.TemporaryDirectory() as directory:
+            manager = TranslationProviderManager(directory)
+
+            class RateLimitedMultiProvider:
+                supports_multi_target = True
+                def __init__(self):
+                    self.calls = 0
+                    self.active = True
+                def is_available(self):
+                    return self.active
+                def translate_chunk_multi_target(self, base_lang, target_langs, protected_items):
+                    self.calls += 1
+                    # Simular 429 inmediato: se desactiva por cooldown y devuelve {}
+                    self.active = False
+                    return {}
+                def translate_single(self, base_lang, target_lang, text):
+                    return None
+
+            class FakeArgos:
+                def __init__(self):
+                    self.calls = []
+                def is_available(self):
+                    return True
+                def translate_single(self, base_lang, target_lang, text):
+                    self.calls.append((base_lang, target_lang, text))
+                    return f"ARGOS:{text}"
+
+            rl_provider = RateLimitedMultiProvider()
+            argos_provider = FakeArgos()
+            manager.providers["cloud_ai"] = rl_provider
+            manager.providers["argos"] = argos_provider
+            manager.config["active_provider"] = "cloud_ai"
+
+            core = TranslationCore(directory, lambda _msg: None)
+            core.provider_manager = manager
+
+            batch = core.translate_batch_optimized("es", {"k1": "Hola", "k2": "Mundo"}, "flutter")
+
+            # Intentó el mini-lote 1 sola vez
+            self.assertEqual(rl_provider.calls, 1)
+            # Y al fallar entró Argos directo
+            self.assertTrue(len(argos_provider.calls) > 0)
+            self.assertEqual(batch["en"]["k1"], "ARGOS:Hola")
+            self.assertEqual(batch["en"]["k2"], "ARGOS:Mundo")
+
+    def test_argos_can_translate_checks_installed_only_without_network(self):
+        class Translation:
+            def translate(self, text):
+                return f"TR:{text}"
+
+        class Language:
+            def __init__(self, code, targets=None):
+                self.code = code
+                self._targets = targets or []
+
+            def get_translation(self, target):
+                if target.code in self._targets:
+                    return Translation()
+                return None
+
+        class TranslateModule:
+            @staticmethod
+            def get_installed_languages():
+                return [
+                    Language("es", ["en"]),
+                    Language("en", ["fr"]),
+                    Language("fr"),
+                ]
+
+        class ShouldNeverBeCalledPackageModule:
+            @staticmethod
+            def update_package_index():
+                raise AssertionError("update_package_index should NOT be called!")
+
+            @staticmethod
+            def get_available_packages():
+                raise AssertionError("get_available_packages should NOT be called!")
+
+        provider = ArgosTranslateProvider(
+            auto_install=True,
+            package_module=ShouldNeverBeCalledPackageModule(),
+            translate_module=TranslateModule(),
+        )
+
+        # Direct installed: es -> en
+        self.assertTrue(provider.can_translate("es", "en"))
+        # Pivot installed: es -> en -> fr
+        self.assertTrue(provider.can_translate("es", "fr"))
+        # Uninstalled: es -> de (must return False immediately without touching package_module)
+        self.assertFalse(provider.can_translate("es", "de"))
+        # translate_single on uninstalled must return None immediately
+        self.assertIsNone(provider.translate_single("es", "de", "Hola"))
+
+
 
 if __name__ == "__main__":
     unittest.main()
+
