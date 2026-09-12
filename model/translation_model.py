@@ -436,7 +436,7 @@ class TranslationCore:
 
                     if hasattr(self, "provider_manager"):
                         translated = self.provider_manager.translate_single_with_failover(
-                            base_lang, google_target, protected_text
+                            base_lang, target_code, protected_text
                         )
                     else:
                         response = requests.get(self.GOOGLE_TRANSLATE_URL, params=params, timeout=15)

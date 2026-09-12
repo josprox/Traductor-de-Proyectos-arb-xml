@@ -38,7 +38,8 @@ class TranslatorAppView(QMainWindow):
         self.setMinimumSize(1050, 700)
         self._current_platform = "flutter" # Estado inicial, se actualiza con el selector
         self._provider_config = {
-            "active_provider": "google", "auto_failover": True,
+            "active_provider": "argos", "auto_failover": True,
+            "argos": {"auto_install": True},
             "local_ai": {"base_url": "http://localhost:11434/v1", "api_key": "", "model": "llama3.2"},
             "cloud_ai": {"base_url": "https://api.deepseek.com/v1", "api_key": "", "model": "deepseek-chat"},
         }
@@ -92,6 +93,7 @@ class TranslatorAppView(QMainWindow):
         header_grid.setSpacing(8)
         header_grid.addWidget(QLabel("Motor:"), 0, 0)
         self.provider_selector = QComboBox()
+        self.provider_selector.addItem("🖥️  Argos Translate (Local, sin límites)", "argos")
         self.provider_selector.addItem("⚡  Google Translate (Multi-Tier)", "google")
         self.provider_selector.addItem("🤖  IA Local (Ollama / LM Studio)", "local_ai")
         self.provider_selector.addItem("☁️  IA Cloud (OpenAI / DeepSeek / Groq)", "cloud_ai")
@@ -463,8 +465,8 @@ class TranslatorAppView(QMainWindow):
         layout = QVBoxLayout(dialog)
         heading = QLabel(
             "<b style='font-size:18px'>Configurar motores inteligentes</b><br>"
-            "<span style='color:#94a3b8'>Conecta Ollama, LM Studio, OpenAI, DeepSeek, Groq "
-            "o cualquier endpoint compatible.</span>"
+            "<span style='color:#94a3b8'>Traduce localmente con Argos o conecta Ollama, "
+            "LM Studio, OpenAI, DeepSeek, Groq y endpoints compatibles.</span>"
         )
         heading.setWordWrap(True)
         layout.addWidget(heading)
@@ -504,17 +506,46 @@ class TranslatorAppView(QMainWindow):
             form.addStretch()
             return page, url, model, api_key
 
+        argos_page = QWidget()
+        argos_layout = QVBoxLayout(argos_page)
+        argos_layout.setContentsMargins(16, 16, 16, 16)
+        argos_layout.setSpacing(10)
+        argos_badge = QLabel("🖥️ Motor neuronal local • sin API • sin errores 429")
+        argos_badge.setObjectName("banner")
+        argos_layout.addWidget(argos_badge)
+        argos_description = QLabel(
+            "Argos descarga los modelos de idioma una sola vez y después traduce completamente "
+            "sin conexión. La primera traducción de cada idioma puede tardar mientras se prepara "
+            "el modelo; las siguientes reutilizan el modelo instalado."
+        )
+        argos_description.setWordWrap(True)
+        argos_layout.addWidget(argos_description)
+        argos_auto_install = QCheckBox("Descargar automáticamente los modelos que falten")
+        argos_auto_install.setChecked(
+            self._provider_config.get("argos", {}).get("auto_install", True)
+        )
+        argos_layout.addWidget(argos_auto_install)
+        argos_storage = QLabel(
+            "Los modelos se guardan en el perfil local del usuario. Para idiomas sin modelo "
+            "disponible se utilizará el motor de respaldo configurado."
+        )
+        argos_storage.setWordWrap(True)
+        argos_storage.setStyleSheet("color:#94a3b8;")
+        argos_layout.addWidget(argos_storage)
+        argos_layout.addStretch()
+
         local_page, local_url, local_model, local_key = provider_tab(
             "local_ai", "http://localhost:11434/v1", "llama3.2"
         )
         cloud_page, cloud_url, cloud_model, cloud_key = provider_tab(
             "cloud_ai", "https://api.deepseek.com/v1", "deepseek-chat", True
         )
+        tabs.addTab(argos_page, "🖥️  Argos Local")
         tabs.addTab(local_page, "🤖  IA Local")
         tabs.addTab(cloud_page, "☁️  IA Cloud")
         layout.addWidget(tabs, 1)
         failover = QCheckBox(
-            "Failover automático: proveedor seleccionado → Google → MyMemory"
+            "Failover automático: proveedor seleccionado → Argos → Google → MyMemory"
         )
         failover.setChecked(self._provider_config.get("auto_failover", True))
         layout.addWidget(failover)
@@ -536,6 +567,7 @@ class TranslatorAppView(QMainWindow):
             self.save_provider_config_requested.emit({
                 "active_provider": self.provider_selector.currentData(),
                 "auto_failover": failover.isChecked(),
+                "argos": {"auto_install": argos_auto_install.isChecked()},
                 "local_ai": {"base_url": local_url.text(), "model": local_model.text(), "api_key": local_key.text()},
                 "cloud_ai": {"base_url": cloud_url.text(), "model": cloud_model.text(), "api_key": cloud_key.text()},
             })
@@ -549,14 +581,14 @@ class TranslatorAppView(QMainWindow):
 
     def update_provider_config_ui(self, config):
         self._provider_config = config
-        active = config.get("active_provider", "google")
+        active = config.get("active_provider", "argos")
         index = self.provider_selector.findData(active)
         if index >= 0:
             self.provider_selector.blockSignals(True)
             self.provider_selector.setCurrentIndex(index)
             self.provider_selector.blockSignals(False)
         names = {
-            "google": "Google Multi-Tier", "local_ai": "IA Local",
+            "argos": "Argos Local", "google": "Google Multi-Tier", "local_ai": "IA Local",
             "cloud_ai": "IA Cloud", "mymemory": "MyMemory",
         }
         fallback = " + failover" if config.get("auto_failover", True) else ""

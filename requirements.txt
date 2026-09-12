@@ -13,5 +13,8 @@ lxml>=5.0.0
 # Peticiones HTTP para API de traducción
 requests>=2.31.0
 
+# Traducción neuronal local y sin límites HTTP
+argostranslate>=1.11.0,<2
+
 # Empaquetado en ejecutable
 pyinstaller>=6.0.0
