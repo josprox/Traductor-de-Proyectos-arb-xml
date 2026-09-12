@@ -150,6 +150,9 @@ class TranslatorAppController(QObject):
             self.view.append_log("⚠️ Completa idioma base, texto original y nombre de etiqueta/string.")
             return
 
+        if self.view.should_clear_console_before_run():
+            self.view.clear_console()
+
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
         self.view.set_progress_bar_format("Traduciendo y agregando: %p%")
@@ -165,6 +168,9 @@ class TranslatorAppController(QObject):
         self.sig_translate_and_add.emit(payload)
 
     def _handle_translate_batch_request(self, content, platform, base_lang):
+        if self.view.should_clear_console_before_run():
+            self.view.clear_console()
+
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
         self.view.set_progress_bar_format("Traduciendo lote: %p%")
@@ -187,6 +193,10 @@ class TranslatorAppController(QObject):
         if platform not in ('flutter', 'kotlin'):
             self.view.append_log("⚠️ Selecciona Flutter (ARB) o Kotlin (XML).")
             return
+
+        if self.view.should_clear_console_before_run():
+            self.view.clear_console()
+
         self.view.set_ui_enabled(False)
         self.view.update_progress_bar(0)
         self.view.set_progress_bar_format("Corrigiendo y sincronizando archivos: %p%")

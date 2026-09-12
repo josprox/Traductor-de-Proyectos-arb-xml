@@ -288,8 +288,22 @@ class TranslatorAppView(QMainWindow):
         console_card = self._make_card()
         console_layout = QVBoxLayout(console_card)
         console_layout.setContentsMargins(10, 6, 10, 8)
-        console_layout.setSpacing(3)
-        console_layout.addWidget(QLabel("<b>Consola de salida y registros:</b>"))
+        console_layout.setSpacing(6)
+
+        console_header = QHBoxLayout()
+        console_header.addWidget(QLabel("<b>Consola de salida y registros:</b>"))
+        console_header.addStretch(1)
+
+        self.clear_console_before_run_cb = QCheckBox("Limpiar consola antes de procesar")
+        self.clear_console_before_run_cb.setChecked(True)
+        console_header.addWidget(self.clear_console_before_run_cb)
+
+        self.clear_console_btn = QPushButton("Limpiar consola")
+        self.clear_console_btn.clicked.connect(self.clear_console)
+        console_header.addWidget(self.clear_console_btn)
+
+        console_layout.addLayout(console_header)
+
         self.output = QTextEdit()
         self.output.setFont(QFont("Consolas", 9))
         self.output.setReadOnly(True)
@@ -402,6 +416,14 @@ class TranslatorAppView(QMainWindow):
     def append_log(self, text):
         """Añade un mensaje a la consola de salida."""
         self.output.append(text)
+
+    def clear_console(self):
+        """Limpia todo el texto de la consola de salida."""
+        self.output.clear()
+
+    def should_clear_console_before_run(self):
+        """Indica si la opción de limpiar la consola antes de procesar está activa."""
+        return self.clear_console_before_run_cb.isChecked()
 
     def update_progress_bar(self, value):
         """Actualiza el valor de la barra de progreso."""
