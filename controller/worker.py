@@ -3,7 +3,7 @@ import os
 import time
 from PySide6.QtCore import QObject, Signal, Slot
 from model.translation_model import TranslationCore
-from model.providers import OpenAICompatibleProvider
+from model.providers import OpenAICompatibleProvider, MicrosoftTranslatorProvider
 
 class TranslationWorker(QObject):
     """
@@ -63,6 +63,24 @@ class TranslationWorker(QObject):
     @Slot(dict)
     def do_test_ai_connection(self, data):
         try:
+            if data.get('type') == 'microsoft':
+                provider = MicrosoftTranslatorProvider(
+                    api_key=data.get('api_key', ''),
+                    region=data.get('region', 'global'),
+                    log_callback=self._thread_safe_log,
+                )
+                started = time.time()
+                translated = provider.translate_single('es', 'en', 'Hola mundo')
+                elapsed = time.time() - started
+                if translated and translated.strip().lower() in ('hello world', 'hello, world', 'hello world.'):
+                    result = {"success": True, "message": f"✅ Microsoft Translator funcionando ({elapsed:.2f}s):\n'Hola mundo' → '{translated}'"}
+                elif translated:
+                    result = {"success": True, "message": f"✅ Conexión correcta ({elapsed:.2f}s):\n{translated}"}
+                else:
+                    result = {"success": False, "message": "Microsoft Translator no devolvió una traducción válida."}
+                self.ai_test_result.emit(result)
+                return
+
             provider = OpenAICompatibleProvider(
                 base_url=data.get('base_url', ''), api_key=data.get('api_key', ''),
                 model=data.get('model', ''), log_callback=self._thread_safe_log,

@@ -80,11 +80,13 @@ class ProviderManagerTests(unittest.TestCase):
             manager = TranslationProviderManager(directory)
             primary = FakeProvider(None)
             argos = FakeProvider(None)
+            microsoft = FakeProvider(None)
             google = FakeProvider(None)
             mymemory = FakeProvider("Hola")
             manager.providers.update({
                 "cloud_ai": primary,
                 "argos": argos,
+                "microsoft": microsoft,
                 "google": google,
                 "mymemory": mymemory,
             })
@@ -96,6 +98,7 @@ class ProviderManagerTests(unittest.TestCase):
             self.assertEqual(result, "Hola")
             self.assertEqual(len(primary.calls), 1)
             self.assertEqual(len(argos.calls), 1)
+            self.assertEqual(len(microsoft.calls), 1)
             self.assertEqual(len(google.calls), 1)
             self.assertEqual(len(mymemory.calls), 1)
 
@@ -145,6 +148,7 @@ class ProviderManagerTests(unittest.TestCase):
             manager = TranslationProviderManager(directory, logs.append)
             manager.providers.update({
                 "argos": FakeProvider(None),
+                "microsoft": FakeProvider(None),
                 "google": FakeProvider(None),
                 "mymemory": FakeProvider("Hola"),
             })
@@ -301,6 +305,57 @@ class ProviderManagerTests(unittest.TestCase):
         # translate_single on uninstalled must return None immediately
         self.assertIsNone(provider.translate_single("es", "de", "Hola"))
 
+    def test_microsoft_provider_language_normalization(self):
+        from model.providers import MicrosoftTranslatorProvider
+        self.assertEqual(MicrosoftTranslatorProvider._normalize_ms_lang("es"), "es")
+        self.assertEqual(MicrosoftTranslatorProvider._normalize_ms_lang("zh"), "zh-Hans")
+        self.assertEqual(MicrosoftTranslatorProvider._normalize_ms_lang("zh-tw"), "zh-Hant")
+        self.assertEqual(MicrosoftTranslatorProvider._normalize_ms_lang("no"), "nb")
+        self.assertEqual(MicrosoftTranslatorProvider._normalize_ms_lang("iw"), "he")
+        self.assertEqual(MicrosoftTranslatorProvider._normalize_ms_lang("in"), "id")
+        self.assertEqual(MicrosoftTranslatorProvider._normalize_ms_lang("fil"), "fil")
+
+    def test_microsoft_provider_azure_mode_mocked(self):
+        from model.providers import MicrosoftTranslatorProvider
+        class MockResponse:
+            status_code = 200
+            ok = True
+            @staticmethod
+            def json():
+                return [{"translations": [{"text": "Hello world", "to": "en"}]}]
+            @staticmethod
+            def raise_for_status():
+                pass
+
+        class MockSession:
+            def __init__(self):
+                self.headers = {}
+                self.posts = []
+            def post(self, url, **kwargs):
+                self.posts.append((url, kwargs))
+                return MockResponse()
+
+        session = MockSession()
+        provider = MicrosoftTranslatorProvider(api_key="test_key", region="eastus", session=session)
+        result = provider.translate_single("es", "en", "Hola mundo")
+        self.assertEqual(result, "Hello world")
+        self.assertEqual(len(session.posts), 1)
+        self.assertIn("Ocp-Apim-Subscription-Key", session.posts[0][1]["headers"])
+        self.assertEqual(session.posts[0][1]["headers"]["Ocp-Apim-Subscription-Key"], "test_key")
+        self.assertEqual(session.posts[0][1]["headers"]["Ocp-Apim-Subscription-Region"], "eastus")
+
+    def test_microsoft_config_roundtrip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = TranslationProviderManager(directory)
+            config = manager.get_public_config()
+            config["active_provider"] = "microsoft"
+            config["microsoft"] = {"api_key": "my_azure_key", "region": "westeurope"}
+            manager.save_config(config)
+
+            restored = TranslationProviderManager(directory).get_public_config()
+            self.assertEqual(restored["active_provider"], "microsoft")
+            self.assertEqual(restored["microsoft"]["api_key"], "my_azure_key")
+            self.assertEqual(restored["microsoft"]["region"], "westeurope")
 
 
 if __name__ == "__main__":

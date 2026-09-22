@@ -1,4 +1,4 @@
-
+﻿
 # Herramienta Multi-propósito: Traductor de Proyectos Flutter/Kotlin
 
 Esta herramienta de escritorio, construida con PySide6, ofrece funcionalidades para la gestión de traducciones en proyectos Flutter (con archivos ARB) y Kotlin (con archivos XML de recursos).
@@ -96,3 +96,11 @@ Permite gestionar cadenas de texto y traducciones para aplicaciones móviles.
 
 * Para Flutter, la herramienta espera una estructura de proyecto estándar, especialmente en `lib/l10n` para los archivos ARB. El archivo ARB base debe tener la clave `@@locale`.
 * Para Kotlin, espera la estructura `app/src/main/res/values` para el idioma base y `values-xx` para otros idiomas.
+
+---
+
+## ☕ Apoya el proyecto / Support
+
+Si este proyecto te ha sido de utilidad o deseas apoyar mi trabajo, ¡puedes invitarme un café!
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Fitted?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black&color=FFDD00)](https://buymeacoffee.com/jossestrely)

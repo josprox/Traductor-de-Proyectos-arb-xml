@@ -94,6 +94,7 @@ class TranslatorAppView(QMainWindow):
         header_grid.addWidget(QLabel("Motor:"), 0, 0)
         self.provider_selector = QComboBox()
         self.provider_selector.addItem("🖥️  Argos Translate (Local, sin límites)", "argos")
+        self.provider_selector.addItem("🪟  Microsoft / Bing Translator", "microsoft")
         self.provider_selector.addItem("⚡  Google Translate (Multi-Tier)", "google")
         self.provider_selector.addItem("🤖  IA Local (Ollama / LM Studio)", "local_ai")
         self.provider_selector.addItem("☁️  IA Cloud (OpenAI / DeepSeek / Groq)", "cloud_ai")
@@ -562,12 +563,46 @@ class TranslatorAppView(QMainWindow):
         cloud_page, cloud_url, cloud_model, cloud_key = provider_tab(
             "cloud_ai", "https://api.deepseek.com/v1", "deepseek-chat", True
         )
+
+        ms_page = QWidget()
+        ms_layout = QVBoxLayout(ms_page)
+        ms_layout.setContentsMargins(16, 16, 16, 16)
+        ms_layout.setSpacing(10)
+        ms_badge = QLabel("🪟 Microsoft / Bing • Motor neuronal de alta precisión")
+        ms_badge.setObjectName("banner")
+        ms_layout.addWidget(ms_badge)
+        ms_desc = QLabel(
+            "Utiliza el traductor neuronal de Microsoft. Si dispones de una clave de Azure "
+            "Translator puedes ingresarla abajo. Si la dejas en blanco, se utilizará "
+            "automáticamente el servicio web de Bing sin necesidad de API key ni cuotas."
+        )
+        ms_desc.setWordWrap(True)
+        ms_layout.addWidget(ms_desc)
+        ms_cfg = self._provider_config.get("microsoft", {})
+        ms_layout.addWidget(QLabel("Azure Translator API Key (Opcional):"))
+        ms_key = QLineEdit(ms_cfg.get("api_key", ""))
+        ms_key.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        ms_key.setPlaceholderText("Dejar en blanco para usar Bing Web gratuito")
+        ms_layout.addWidget(ms_key)
+        ms_layout.addWidget(QLabel("Región de Azure:"))
+        ms_region = QLineEdit(ms_cfg.get("region", "global"))
+        ms_region.setPlaceholderText("global (o ej: eastus, westeurope)")
+        ms_layout.addWidget(ms_region)
+        ms_test = QPushButton("🔍  Probar Microsoft Translator")
+        ms_test.clicked.connect(lambda: self.test_ai_connection_requested.emit({
+            "type": "microsoft", "api_key": ms_key.text().strip(),
+            "region": ms_region.text().strip() or "global",
+        }))
+        ms_layout.addWidget(ms_test)
+        ms_layout.addStretch()
+
         tabs.addTab(argos_page, "🖥️  Argos Local")
+        tabs.addTab(ms_page, "🪟  Microsoft / Bing")
         tabs.addTab(local_page, "🤖  IA Local")
         tabs.addTab(cloud_page, "☁️  IA Cloud")
         layout.addWidget(tabs, 1)
         failover = QCheckBox(
-            "Failover automático: proveedor seleccionado → Argos → Google → MyMemory"
+            "Failover automático: proveedor seleccionado → Argos → Microsoft → IA → Google → MyMemory"
         )
         failover.setChecked(self._provider_config.get("auto_failover", True))
         layout.addWidget(failover)
@@ -590,6 +625,7 @@ class TranslatorAppView(QMainWindow):
                 "active_provider": self.provider_selector.currentData(),
                 "auto_failover": failover.isChecked(),
                 "argos": {"auto_install": argos_auto_install.isChecked()},
+                "microsoft": {"api_key": ms_key.text().strip(), "region": ms_region.text().strip() or "global"},
                 "local_ai": {"base_url": local_url.text(), "model": local_model.text(), "api_key": local_key.text()},
                 "cloud_ai": {"base_url": cloud_url.text(), "model": cloud_model.text(), "api_key": cloud_key.text()},
             })
@@ -610,7 +646,7 @@ class TranslatorAppView(QMainWindow):
             self.provider_selector.setCurrentIndex(index)
             self.provider_selector.blockSignals(False)
         names = {
-            "argos": "Argos Local", "google": "Google Multi-Tier", "local_ai": "IA Local",
+            "argos": "Argos Local", "microsoft": "Microsoft / Bing", "google": "Google Multi-Tier", "local_ai": "IA Local",
             "cloud_ai": "IA Cloud", "mymemory": "MyMemory",
         }
         fallback = " + failover" if config.get("auto_failover", True) else ""

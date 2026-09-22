@@ -431,9 +431,10 @@ class TranslationCore:
         if not pending_langs:
             return translations
 
-        # 2. Si el motor principal es IA y está activo, traducir con IA primero
-        if active_provider in ("cloud_ai", "local_ai") and manager and manager.supports_multi_target():
-            self._log(f"🌐 Solicitando traducción multi-idioma ({len(pending_langs)} idiomas) con IA...")
+        # 2. Si el motor principal soporta multi-target y está activo, traducir con él primero
+        if active_provider in ("cloud_ai", "local_ai", "microsoft") and manager and manager.supports_multi_target():
+            prov_lbl = "Microsoft Translator" if active_provider == "microsoft" else "IA"
+            self._log(f"🌐 Solicitando traducción multi-idioma ({len(pending_langs)} idiomas) con {prov_lbl}...")
             multi_map = manager.translate_multi_target_with_failover(base_lang, pending_langs, protected_text)
             for lang_code, translated in multi_map.items():
                 if translated and isinstance(translated, str):
@@ -461,18 +462,19 @@ class TranslationCore:
             if not pending_langs:
                 return translations
 
-        # 4. Paso 2: Para los idiomas que Argos no soporta (ej. be, ml, or, pa), entra la IA
-        ai_provider = None
+        # 4. Paso 2: Para los idiomas que Argos no soporta (ej. be, ml, or, pa), entra la IA o Microsoft
+        multi_provider = None
         if manager:
             providers_map = getattr(manager, "providers", {})
-            for ai_name in ("cloud_ai", "local_ai"):
-                cand = providers_map.get(ai_name)
+            for name in ("cloud_ai", "local_ai", "microsoft"):
+                cand = providers_map.get(name)
                 if cand and getattr(cand, "supports_multi_target", False) and cand.is_available():
-                    ai_provider = cand
+                    multi_provider = cand
                     break
-        if ai_provider and pending_langs:
-            self._log(f"🌐 Solicitando idiomas no cubiertos por Argos ({len(pending_langs)} idiomas) con IA...")
-            multi_map = ai_provider.translate_multi_target(base_lang, pending_langs, protected_text)
+        if multi_provider and pending_langs:
+            prov_desc = "Microsoft Translator" if getattr(multi_provider, "display_name", "") == "Microsoft / Bing Translator" else "IA"
+            self._log(f"🌐 Solicitando idiomas no cubiertos por Argos ({len(pending_langs)} idiomas) con {prov_desc}...")
+            multi_map = multi_provider.translate_multi_target(base_lang, pending_langs, protected_text)
             for lang_code, translated in multi_map.items():
                 if translated and isinstance(translated, str):
                     restored = self.restore_placeholders(translated, placeholders)

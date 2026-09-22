@@ -569,10 +569,225 @@ class MyMemoryProvider(BaseTranslationProvider):
         return None
 
 
+class MicrosoftTranslatorProvider(BaseTranslationProvider):
+    display_name = "Microsoft / Bing Translator"
+    supports_multi_target = True
+    AZURE_ENDPOINT = "https://api.cognitive.microsofttranslator.com/translate?api-version=3.0"
+    BING_PAGE_URL = "https://www.bing.com/translator"
+    BING_API_URL = "https://www.bing.com/ttranslatev3?isVertical=1"
+
+    def __init__(self, api_key="", region="global", session=None, log_callback=None):
+        super().__init__(session=session, log_callback=log_callback)
+        self.session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.bing.com/translator",
+            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        })
+        self.api_key = (api_key or "").strip()
+        self.region = (region or "global").strip() or "global"
+        self._bing_lock = threading.Lock()
+        self._bing_credentials = None
+        self._cooldown_until = 0.0
+        self._cooldown_lock = threading.Lock()
+
+    @staticmethod
+    def _normalize_ms_lang(lang_code):
+        raw = (lang_code or "").strip().lower().replace("_", "-")
+        if raw in ("zh-tw", "zh-hant", "zh-hk"):
+            return "zh-Hant"
+        code = normalize_language_code(lang_code)
+        aliases = {
+            "zh": "zh-Hans",
+            "zh-cn": "zh-Hans",
+            "zh-tw": "zh-Hant",
+            "zh-hans": "zh-Hans",
+            "zh-hant": "zh-Hant",
+            "nb": "nb",
+            "no": "nb",
+            "he": "he",
+            "iw": "he",
+            "id": "id",
+            "in": "id",
+            "tl": "fil",
+            "fil": "fil",
+        }
+        return aliases.get(code.lower(), code)
+
+    def is_available(self):
+        with self._cooldown_lock:
+            return time.monotonic() >= self._cooldown_until
+
+    def _get_bing_credentials(self, force_refresh=False):
+        with self._bing_lock:
+            now = time.monotonic()
+            if not force_refresh and self._bing_credentials:
+                ig, iid, key, token, expires_at = self._bing_credentials
+                if now < expires_at:
+                    return ig, iid, key, token
+
+            try:
+                resp = self.session.get(self.BING_PAGE_URL, timeout=12)
+                resp.raise_for_status()
+                text = resp.text
+
+                ig_match = re.search(r'IG:"([A-Za-z0-9]+)"', text)
+                iid_match = re.search(r'data-iid="([^"]+)"', text)
+                params_match = re.search(r'params_AbusePreventionHelper\s*=\s*\[(.*?)\];', text)
+
+                if not (ig_match and iid_match and params_match):
+                    raise RuntimeError("No se pudieron extraer los tokens de Bing Translator.")
+
+                ig = ig_match.group(1)
+                iid = iid_match.group(1)
+                params_str = params_match.group(1)
+                parts = [p.strip().strip('"') for p in params_str.split(',')]
+                key = parts[0]
+                token = parts[1]
+
+                self._bing_credentials = (ig, iid, key, token, now + 1800)
+                return ig, iid, key, token
+            except Exception as exc:
+                self.log(f"⚠️ Error obteniendo credenciales de Microsoft/Bing: {exc}")
+                return None, None, None, None
+
+    def _translate_azure(self, source, target, protected_text):
+        headers = {
+            "Ocp-Apim-Subscription-Key": self.api_key,
+            "Ocp-Apim-Subscription-Region": self.region,
+            "Content-Type": "application/json",
+        }
+        params = {"from": source, "to": target}
+        payload = [{"Text": protected_text}]
+        resp = self.session.post(self.AZURE_ENDPOINT, params=params, headers=headers, json=payload, timeout=15)
+        if resp.status_code == 429:
+            with self._cooldown_lock:
+                self._cooldown_until = time.monotonic() + 60
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        if data and isinstance(data, list) and "translations" in data[0]:
+            trans = data[0]["translations"]
+            if trans and "text" in trans[0]:
+                return trans[0]["text"]
+        return None
+
+    def _translate_bing_web(self, source, target, protected_text):
+        for retry in range(2):
+            ig, iid, key, token = self._get_bing_credentials(force_refresh=(retry > 0))
+            if not (ig and iid and key and token):
+                return None
+            url = f"{self.BING_API_URL}&&IG={ig}&IID={iid}"
+            data = {
+                "fromLang": source,
+                "to": target,
+                "text": protected_text,
+                "key": key,
+                "token": token,
+            }
+            try:
+                resp = self.session.post(url, data=data, timeout=12)
+                if resp.status_code == 429:
+                    with self._cooldown_lock:
+                        self._cooldown_until = time.monotonic() + 30
+                    return None
+                if resp.status_code in (401, 403) and retry == 0:
+                    continue
+                resp.raise_for_status()
+                parsed = resp.json()
+                if parsed and isinstance(parsed, list) and "translations" in parsed[0]:
+                    t_list = parsed[0]["translations"]
+                    if t_list and "text" in t_list[0]:
+                        return html.unescape(t_list[0]["text"])
+            except Exception as exc:
+                if retry == 1:
+                    self.log(f"⚠️ Microsoft/Bing Translate ({target}): {exc}")
+        return None
+
+    def translate_single(self, base_lang, target_lang, protected_text):
+        if not self.is_available():
+            return None
+        source = self._normalize_ms_lang(base_lang)
+        target = self._normalize_ms_lang(target_lang)
+        if source == target:
+            return protected_text
+
+        if self.api_key:
+            try:
+                res = self._translate_azure(source, target, protected_text)
+                if res:
+                    return res
+            except Exception as exc:
+                self.log(f"⚠️ Azure Translator falló, usando motor web Bing: {exc}")
+
+        return self._translate_bing_web(source, target, protected_text)
+
+    def translate_multi_target(self, base_lang, target_langs, protected_text):
+        if not self.is_available() or not target_langs:
+            return {}
+        source = self._normalize_ms_lang(base_lang)
+        needed = [l for l in target_langs if l != base_lang]
+        if not needed:
+            return {}
+
+        results = {}
+        if self.api_key:
+            try:
+                headers = {
+                    "Ocp-Apim-Subscription-Key": self.api_key,
+                    "Ocp-Apim-Subscription-Region": self.region,
+                    "Content-Type": "application/json",
+                }
+                params = [("from", source)]
+                for l in needed:
+                    params.append(("to", self._normalize_ms_lang(l)))
+                payload = [{"Text": protected_text}]
+                resp = self.session.post(self.AZURE_ENDPOINT, params=params, headers=headers, json=payload, timeout=20)
+                if resp.status_code != 429 and resp.ok:
+                    data = resp.json()
+                    if data and isinstance(data, list) and "translations" in data[0]:
+                        for t_obj in data[0]["translations"]:
+                            t_target = t_obj.get("to")
+                            t_val = t_obj.get("text")
+                            if t_target and t_val:
+                                for orig_l in needed:
+                                    if self._normalize_ms_lang(orig_l) == t_target:
+                                        results[orig_l] = t_val
+                        if len(results) == len(needed):
+                            return results
+            except Exception as exc:
+                self.log(f"⚠️ Azure multi-target falló, usando Bing web: {exc}")
+
+        pending = [l for l in needed if l not in results]
+        if not pending:
+            return results
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _worker(t_lang):
+            return t_lang, self.translate_single(base_lang, t_lang, protected_text)
+
+        max_w = min(8, len(pending))
+        with ThreadPoolExecutor(max_workers=max_w) as executor:
+            futures = {executor.submit(_worker, l): l for l in pending}
+            for fut in as_completed(futures):
+                try:
+                    lang_code, translated = fut.result()
+                    if translated:
+                        results[lang_code] = translated
+                except Exception:
+                    pass
+
+        return results
+
+
 class TranslationProviderManager:
     CONFIG_FILE = "translation_config.json"
     CONFIG_VERSION = 2
-    PROVIDER_NAMES = ("argos", "google", "local_ai", "cloud_ai", "mymemory")
+    PROVIDER_NAMES = ("argos", "microsoft", "google", "local_ai", "cloud_ai", "mymemory")
 
     def __init__(self, config_dir=None, log_callback=None):
         self.config_dir = config_dir or os.getcwd()
@@ -585,6 +800,9 @@ class TranslationProviderManager:
             "active_provider": "argos",
             "auto_failover": True,
             "argos": {"auto_install": True},
+            "microsoft": {
+                "api_key": "", "region": "global"
+            },
             "local_ai": {
                 "base_url": "http://localhost:11434/v1", "api_key": "", "model": "llama3.2"
             },
@@ -598,11 +816,13 @@ class TranslationProviderManager:
     def _build_providers(self):
         local = self.config["local_ai"]
         cloud = self.config["cloud_ai"]
+        microsoft = self.config.get("microsoft", {})
         self.providers = {
             "argos": ArgosTranslateProvider(
                 auto_install=self.config["argos"].get("auto_install", True),
                 log_callback=self.log_callback,
             ),
+            "microsoft": MicrosoftTranslatorProvider(**microsoft, log_callback=self.log_callback),
             "google": GoogleTranslateProvider(log_callback=self.log_callback),
             "local_ai": OpenAICompatibleProvider(**local, log_callback=self.log_callback),
             "cloud_ai": OpenAICompatibleProvider(**cloud, log_callback=self.log_callback),
@@ -624,6 +844,8 @@ class TranslationProviderManager:
                     self.config["active_provider"] = "argos"
                 if isinstance(saved.get("argos"), dict):
                     self.config["argos"].update(saved["argos"])
+                if isinstance(saved.get("microsoft"), dict):
+                    self.config["microsoft"].update(saved["microsoft"])
                 for key in ("local_ai", "cloud_ai"):
                     if isinstance(saved.get(key), dict):
                         self.config[key].update(saved[key])
@@ -646,6 +868,10 @@ class TranslationProviderManager:
             self.config["argos"]["auto_install"] = bool(
                 new_config["argos"].get("auto_install", True)
             )
+        if isinstance(new_config.get("microsoft"), dict):
+            for field in ("api_key", "region"):
+                if field in new_config["microsoft"]:
+                    self.config["microsoft"][field] = str(new_config["microsoft"][field]).strip()
         for key in ("local_ai", "cloud_ai"):
             values = new_config.get(key, {})
             if isinstance(values, dict):
@@ -703,7 +929,7 @@ class TranslationProviderManager:
         auto_failover = self.config.get("auto_failover", True)
         chain = [active_name]
         if auto_failover:
-            for candidate in ("argos", "cloud_ai", "local_ai", "google", "mymemory"):
+            for candidate in ("argos", "microsoft", "cloud_ai", "local_ai", "google", "mymemory"):
                 if candidate not in chain:
                     chain.append(candidate)
         for name in chain:
